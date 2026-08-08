@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -254,7 +255,8 @@ class SemanticControlCoordinatorTest {
         assertThat(before.cancel()).isTrue();
         assertThat(before.cancel()).isFalse();
         assertThat(before.state()).isEqualTo(SemanticHoldState.CANCELLED);
-        assertThat(before.reached().toCompletableFuture()).isCompletedExceptionally();
+        assertThatThrownBy(before.reached().toCompletableFuture()::join)
+            .isInstanceOf(CompletionException.class);
         assertImmediate(beforeFixture.coordinator.permit(interaction("target", 1)));
 
         Fixture afterFixture = fixture();
@@ -293,7 +295,8 @@ class SemanticControlCoordinatorTest {
         failedPermit.writeFailed();
 
         assertThat(failed.state()).isEqualTo(SemanticHoldState.FAILED);
-        assertThat(release.toCompletableFuture()).isCompletedExceptionally();
+        assertThatThrownBy(release.toCompletableFuture()::join)
+            .isInstanceOf(CompletionException.class);
         assertThat(events(failureFixture).getLast().failure())
             .contains(SemanticHoldFailure.WRITE_FAILURE);
         assertThat(states(failureFixture).stream()
@@ -991,7 +994,7 @@ class SemanticControlCoordinatorTest {
 
         assertThat(reached.permit.awaitDecision()).isEqualTo(ForwardingDecision.FORWARD);
         reached.permit.forwarded();
-        assertThat(release.toCompletableFuture()).isCompletedWithValue(null);
+        assertThat(await(release)).isNull();
         assertThat(reached.fixture.proofSubjects.correlation(
             reached.subject,
             reached.key,
@@ -1046,12 +1049,13 @@ class SemanticControlCoordinatorTest {
                 assertThat(reached.permit.awaitDecision())
                     .isEqualTo(ForwardingDecision.CLOSE_SESSION);
                 assertThat(reached.hold.state()).isEqualTo(SemanticHoldState.FAILED);
-                assertThat(release.toCompletableFuture()).isCompletedExceptionally();
+                assertThatThrownBy(release.toCompletableFuture()::join)
+                    .isInstanceOf(CompletionException.class);
             } else {
                 assertThat(reached.permit.awaitDecision())
                     .isEqualTo(ForwardingDecision.FORWARD);
                 reached.permit.forwarded();
-                assertThat(release.toCompletableFuture()).isCompletedWithValue(null);
+                assertThat(await(release)).isNull();
             }
             assertThat(reached.fixture.proofSubjects.correlation(
                 reached.subject,

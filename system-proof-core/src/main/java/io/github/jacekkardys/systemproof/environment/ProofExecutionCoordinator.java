@@ -11,7 +11,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -19,7 +18,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.ThreadPoolExecutor;
 import java.util.function.Predicate;
 import io.github.jacekkardys.systemproof.control.SemanticHoldFailure;
 import io.github.jacekkardys.systemproof.control.SemanticHoldRef;
@@ -46,6 +44,7 @@ import io.github.jacekkardys.systemproof.proof.ProofEvaluationState;
 import io.github.jacekkardys.systemproof.proof.ProofExecution;
 import io.github.jacekkardys.systemproof.proof.ProofExecutionState;
 import io.github.jacekkardys.systemproof.proof.ProofFailureStage;
+import io.github.jacekkardys.systemproof.proof.ProofInteractionProvenance;
 import io.github.jacekkardys.systemproof.proof.ProofObligationResolution;
 import io.github.jacekkardys.systemproof.proof.ProofOutcome;
 import io.github.jacekkardys.systemproof.proof.ProofPlan;
@@ -77,7 +76,6 @@ final class ProofExecutionCoordinator
     private final DeadlineScheduler deadlineScheduler;
     private final ProofOutcomeEvaluator outcomeEvaluator;
     private final BoundaryObserver boundaryObserver;
-    private final CompletionDispatcher completionDispatcher;
     private ProofSubjectRegistry proofSubjects;
     private SemanticControlCoordinator controls;
     private RuntimeConnectionRegistry connections;
@@ -119,7 +117,6 @@ final class ProofExecutionCoordinator
             boundaryObserver,
             "boundaryObserver must not be null"
         );
-        completionDispatcher = new CompletionDispatcher();
     }
 
     synchronized void bind(
@@ -638,8 +635,6 @@ final class ProofExecutionCoordinator
                     diagnostic(ProofFailureStage.CLEANUP, failure)
                 );
             }
-        } finally {
-            completionDispatcher.close();
         }
         return unfinished;
     }
@@ -974,7 +969,9 @@ final class ProofExecutionCoordinator
                             ProofResolution.SATISFIED,
                             ProofResolutionReason.CORRELATION_UNIQUE,
                             Optional.of(correlation.connectionId()),
-                            List.of(event.interactionRef())
+                            List.of(ProofInteractionProvenance.correlation(
+                                event.interactionRef()
+                            ))
                         );
                     }
                 }
@@ -1025,13 +1022,16 @@ final class ProofExecutionCoordinator
         if (control == null && evidence == null) {
             return;
         }
-        List<InteractionRef> interactions = event.interactionRef().stream().toList();
+        List<ProofInteractionProvenance> provenance = event.interactionRef()
+            .map(ProofInteractionProvenance::hold)
+            .stream()
+            .toList();
         if (evidence != null && event.interactionRef().isPresent()) {
             evidence.set(
                 ProofResolution.SATISFIED,
                 ProofResolutionReason.EVIDENCE_PRESENT,
                 Optional.of(event.connectionId()),
-                interactions
+                provenance
             );
         }
         if (control == null) {
@@ -1045,24 +1045,24 @@ final class ProofExecutionCoordinator
                 ProofResolution.SATISFIED,
                 ProofResolutionReason.CONTROL_REACHED_EXPECTED_STATE,
                 Optional.of(event.connectionId()),
-                interactions
+                provenance
             );
             case CANCELLED -> control.set(
                 ProofResolution.UNREACHED,
                 ProofResolutionReason.CONTROL_UNREACHED,
                 Optional.of(event.connectionId()),
-                interactions
+                provenance
             );
             case TIMED_OUT -> {
                 control.set(
                     ProofResolution.TIMED_OUT,
                     ProofResolutionReason.CONTROL_TIMED_OUT,
                     Optional.of(event.connectionId()),
-                    interactions
+                    provenance
                 );
                 completeLocked(record, ProofOutcome.INCONCLUSIVE, null);
             }
-            case FAILED -> applyHoldFailure(record, control, event, interactions);
+            case FAILED -> applyHoldFailure(record, control, event, provenance);
         }
     }
 
@@ -1070,7 +1070,7 @@ final class ProofExecutionCoordinator
         ExecutionRecord record,
         RequirementState control,
         SemanticHoldEvent event,
-        List<InteractionRef> interactions
+        List<ProofInteractionProvenance> provenance
     ) {
         SemanticHoldFailure failure = event.failure().orElse(SemanticHoldFailure.INTERNAL_FAILURE);
         switch (failure) {
@@ -1079,7 +1079,7 @@ final class ProofExecutionCoordinator
                     ProofResolution.AMBIGUOUS,
                     ProofResolutionReason.CONTROL_CORRELATION_INVALIDATED,
                     Optional.of(event.connectionId()),
-                    interactions
+                    provenance
                 );
                 completeLocked(record, ProofOutcome.INCONCLUSIVE, null);
             }
@@ -1088,7 +1088,7 @@ final class ProofExecutionCoordinator
                     ProofResolution.MISSING,
                     ProofResolutionReason.CONTROL_SESSION_ENDED,
                     Optional.of(event.connectionId()),
-                    interactions
+                    provenance
                 );
                 completeLocked(record, ProofOutcome.INCONCLUSIVE, null);
             }
@@ -1097,7 +1097,7 @@ final class ProofExecutionCoordinator
                     ProofResolution.FAILED,
                     ProofResolutionReason.CONTROL_FAILED,
                     Optional.of(event.connectionId()),
-                    interactions
+                    provenance
                 );
                 completeLocked(
                     record,
@@ -1126,15 +1126,15 @@ final class ProofExecutionCoordinator
         if (control == null && evidence == null && relation == null) {
             return;
         }
-        List<InteractionRef> interactions = guardInteractions(event);
+        List<ProofInteractionProvenance> provenance = guardProvenance(event);
         if (evidence != null) {
             event.predecessor().ifPresent(reference -> setEvidence(
                 evidence.get(ProofEvidenceKind.PREDECESSOR_INTERACTION),
-                reference
+                ProofInteractionProvenance.predecessor(reference)
             ));
             event.successor().ifPresent(reference -> setEvidence(
                 evidence.get(ProofEvidenceKind.SUCCESSOR_INTERACTION),
-                reference
+                ProofInteractionProvenance.successor(reference)
             ));
         }
         if (event.kind() == SemanticPredecessorGuardEvent.Kind.RELATION && relation != null) {
@@ -1142,7 +1142,7 @@ final class ProofExecutionCoordinator
                 ProofResolution.SATISFIED,
                 ProofResolutionReason.CAUSAL_RELATION_ESTABLISHED,
                 Optional.empty(),
-                interactions
+                provenance
             );
         }
         if (event.kind() == SemanticPredecessorGuardEvent.Kind.TERMINAL) {
@@ -1152,7 +1152,7 @@ final class ProofExecutionCoordinator
                         ProofResolution.SATISFIED,
                         ProofResolutionReason.CONTROL_REACHED_EXPECTED_STATE,
                         Optional.empty(),
-                        interactions
+                        provenance
                     );
                 }
                 if (relation != null) {
@@ -1160,7 +1160,7 @@ final class ProofExecutionCoordinator
                         ProofResolution.SATISFIED,
                         ProofResolutionReason.CAUSAL_RELATION_ESTABLISHED,
                         Optional.empty(),
-                        interactions
+                        provenance
                     );
                 }
                 return;
@@ -1173,7 +1173,7 @@ final class ProofExecutionCoordinator
                         ProofResolution.VIOLATED,
                         ProofResolutionReason.CAUSAL_RELATION_VIOLATED,
                         successorConnection,
-                        interactions
+                        provenance
                     );
                 }
                 if (relation != null) {
@@ -1181,7 +1181,7 @@ final class ProofExecutionCoordinator
                         ProofResolution.VIOLATED,
                         ProofResolutionReason.CAUSAL_RELATION_VIOLATED,
                         successorConnection,
-                        interactions
+                        provenance
                     );
                 }
                 completeLocked(record, ProofOutcome.VIOLATED, null);
@@ -1196,7 +1196,7 @@ final class ProofExecutionCoordinator
                     ProofResolution.VIOLATED,
                     ProofResolutionReason.CAUSAL_RELATION_VIOLATED,
                     successorConnection,
-                    interactions
+                    provenance
                 );
             }
             if (relation != null) {
@@ -1204,7 +1204,7 @@ final class ProofExecutionCoordinator
                     ProofResolution.VIOLATED,
                     ProofResolutionReason.CAUSAL_RELATION_VIOLATED,
                     successorConnection,
-                    interactions
+                    provenance
                 );
             }
             completeLocked(record, ProofOutcome.VIOLATED, null);
@@ -1222,7 +1222,7 @@ final class ProofExecutionCoordinator
                 ProofResolution.SATISFIED,
                 ProofResolutionReason.CONTROL_REACHED_EXPECTED_STATE,
                 Optional.empty(),
-                interactions
+                provenance
             );
             case VIOLATED -> {
                 // The explicit VIOLATION fact is the authoritative terminal counterexample.
@@ -1231,18 +1231,18 @@ final class ProofExecutionCoordinator
                 ProofResolution.UNREACHED,
                 ProofResolutionReason.CONTROL_UNREACHED,
                 Optional.empty(),
-                interactions
+                provenance
             );
             case TIMED_OUT -> {
                 control.set(
                     ProofResolution.TIMED_OUT,
                     ProofResolutionReason.CONTROL_TIMED_OUT,
                     Optional.empty(),
-                    interactions
+                    provenance
                 );
                 completeLocked(record, ProofOutcome.INCONCLUSIVE, null);
             }
-            case FAILED -> applyGuardFailure(record, control, event, interactions);
+            case FAILED -> applyGuardFailure(record, control, event, provenance);
         }
     }
 
@@ -1250,7 +1250,7 @@ final class ProofExecutionCoordinator
         ExecutionRecord record,
         RequirementState control,
         SemanticPredecessorGuardEvent event,
-        List<InteractionRef> interactions
+        List<ProofInteractionProvenance> provenance
     ) {
         SemanticPredecessorGuardFailure failure = event.failure()
             .orElse(SemanticPredecessorGuardFailure.INTERNAL_FAILURE);
@@ -1260,7 +1260,7 @@ final class ProofExecutionCoordinator
                     ProofResolution.AMBIGUOUS,
                     ProofResolutionReason.CONTROL_CORRELATION_INVALIDATED,
                     Optional.empty(),
-                    interactions
+                    provenance
                 );
                 completeLocked(record, ProofOutcome.INCONCLUSIVE, null);
             }
@@ -1269,7 +1269,7 @@ final class ProofExecutionCoordinator
                     ProofResolution.MISSING,
                     ProofResolutionReason.CONTROL_SESSION_ENDED,
                     Optional.empty(),
-                    interactions
+                    provenance
                 );
                 completeLocked(record, ProofOutcome.INCONCLUSIVE, null);
             }
@@ -1279,7 +1279,7 @@ final class ProofExecutionCoordinator
                     ProofResolution.FAILED,
                     ProofResolutionReason.CONTROL_FAILED,
                     Optional.empty(),
-                    interactions
+                    provenance
                 );
                 if (record.state != ProofExecutionState.ACTIVATING) {
                     completeLocked(
@@ -1567,7 +1567,10 @@ final class ProofExecutionCoordinator
                     ProofResolution.SATISFIED,
                     ProofResolutionReason.CORRELATION_UNIQUE,
                     Optional.of(correlation.connectionId()),
-                    snapshot.interaction().stream().toList()
+                    snapshot.interaction()
+                        .map(ProofInteractionProvenance::correlation)
+                        .stream()
+                        .toList()
                 );
                 case AMBIGUOUS -> state.set(
                     ProofResolution.AMBIGUOUS,
@@ -1752,7 +1755,7 @@ final class ProofExecutionCoordinator
     private void finalizePending(ExecutionRecord record) {
         boolean owner = false;
         synchronized (this) {
-            if (record.outcome == null || record.result != null) {
+            if (record.outcome == null || record.finalizationComplete) {
                 return;
             }
             if (record.deadlineInstalling) {
@@ -1767,7 +1770,7 @@ final class ProofExecutionCoordinator
             }
         }
         if (!owner) {
-            awaitResult(record);
+            awaitFinalization(record);
             return;
         }
 
@@ -1801,8 +1804,12 @@ final class ProofExecutionCoordinator
                 );
             }
         }
+        if (controlNotifications != null) {
+            controls.runPreparedInternalActions(controlNotifications);
+        }
 
         ProofResult frozen;
+        SemanticControlCoordinator.CompletionGate publicationGate = controls.newCompletionGate();
         try {
             synchronized (this) {
                 frozen = new ProofResult(
@@ -1818,26 +1825,39 @@ final class ProofExecutionCoordinator
                 );
                 record.result = frozen;
                 record.state = ProofExecutionState.COMPLETED;
-                record.finalizationOwner = null;
             }
+            boundaryObserver.resultCreatedBeforeCompletionSubmission();
         } catch (RuntimeException | Error failure) {
             synchronized (this) {
                 record.finalizing = false;
                 record.finalizationOwner = null;
             }
             record.resultReady.completeExceptionally(failure);
+            record.finalizationReady.complete(null);
             return;
         }
-        record.resultReady.complete(frozen);
         if (controlNotifications != null) {
-            SemanticControlCoordinator.PreparedControlCancellation notifications =
-                controlNotifications;
-            completionDispatcher.dispatch(notifications::deliver);
+            controls.submitPreparedPublicCompletions(
+                controlNotifications,
+                publicationGate
+            );
         }
+        record.resultReady.complete(frozen);
+        publicationGate.open();
+        synchronized (this) {
+            record.finalizationComplete = true;
+            record.finalizing = false;
+            record.finalizationOwner = null;
+        }
+        record.finalizationReady.complete(null);
     }
 
     private ProofResult awaitResult(ExecutionRecord record) {
         return record.resultReady.join();
+    }
+
+    private static void awaitFinalization(ExecutionRecord record) {
+        record.finalizationReady.join();
     }
 
     private static void joinObservationRefresh(CompletionStage<Void> refresh) {
@@ -1907,24 +1927,29 @@ final class ProofExecutionCoordinator
         return record.outcome != null;
     }
 
-    private static void setEvidence(RequirementState state, InteractionRef reference) {
+    private static void setEvidence(
+        RequirementState state,
+        ProofInteractionProvenance provenance
+    ) {
         if (state != null) {
             state.set(
                 ProofResolution.SATISFIED,
                 ProofResolutionReason.EVIDENCE_PRESENT,
-                Optional.of(reference.connectionId()),
-                List.of(reference)
+                Optional.of(provenance.interaction().connectionId()),
+                List.of(provenance)
             );
         }
     }
 
-    private static List<InteractionRef> guardInteractions(
+    private static List<ProofInteractionProvenance> guardProvenance(
         SemanticPredecessorGuardEvent event
     ) {
-        List<InteractionRef> interactions = new ArrayList<>(2);
-        event.predecessor().ifPresent(interactions::add);
-        event.successor().ifPresent(interactions::add);
-        return List.copyOf(interactions);
+        List<ProofInteractionProvenance> provenance = new ArrayList<>(2);
+        event.predecessor().map(ProofInteractionProvenance::predecessor)
+            .ifPresent(provenance::add);
+        event.successor().map(ProofInteractionProvenance::successor)
+            .ifPresent(provenance::add);
+        return List.copyOf(provenance);
     }
 
     private boolean isWithinEvidenceWindow(
@@ -2081,6 +2106,8 @@ final class ProofExecutionCoordinator
         default void evaluationBoundaryReached() {}
 
         default void evidenceWindowCaptured() {}
+
+        default void resultCreatedBeforeCompletionSubmission() {}
     }
 
     @FunctionalInterface
@@ -2105,37 +2132,6 @@ final class ProofExecutionCoordinator
                 TimeUnit.NANOSECONDS
             );
             return () -> future.cancel(false);
-        }
-
-        @Override
-        public void close() {
-            executor.shutdownNow();
-        }
-    }
-
-    private static final class CompletionDispatcher implements AutoCloseable {
-        private final ThreadPoolExecutor executor = new ThreadPoolExecutor(
-            1,
-            1,
-            0L,
-            TimeUnit.MILLISECONDS,
-            new ArrayBlockingQueue<>(1),
-            runnable -> {
-                Thread thread = new Thread(
-                    runnable,
-                    "system-proof-completion-delivery"
-                );
-                thread.setDaemon(true);
-                return thread;
-            },
-            new ThreadPoolExecutor.AbortPolicy()
-        );
-
-        private void dispatch(Runnable notifications) {
-            executor.execute(Objects.requireNonNull(
-                notifications,
-                "notifications must not be null"
-            ));
         }
 
         @Override
@@ -2302,6 +2298,7 @@ final class ProofExecutionCoordinator
             new HashMap<>();
         private final List<ProofDiagnostic> secondaryDiagnostics = new ArrayList<>();
         private final CompletableFuture<ProofResult> resultReady = new CompletableFuture<>();
+        private final CompletableFuture<Void> finalizationReady = new CompletableFuture<>();
         private ProofExecutionState state = ProofExecutionState.DRAFT;
         private ProofOutcome outcome;
         private ProofDiagnostic primaryFailure;
@@ -2317,6 +2314,7 @@ final class ProofExecutionCoordinator
         private ProofEvaluationState evaluationState = ProofEvaluationState.NOT_STARTED;
         private Thread finalizationOwner;
         private boolean finalizing;
+        private boolean finalizationComplete;
         private boolean activationReached;
         private ProofEvidenceWindowTracker.EvidenceWindow evidenceWindow;
 
@@ -2357,7 +2355,7 @@ final class ProofExecutionCoordinator
         private ProofResolutionReason reason =
             ProofResolutionReason.NOT_EVALUATED_AFTER_TERMINAL_OUTCOME;
         private Optional<ConnectionId> connectionId = Optional.empty();
-        private List<InteractionRef> interactions = List.of();
+        private List<ProofInteractionProvenance> provenance = List.of();
 
         private RequirementState(
             ProofPlan.Requirement requirement,
@@ -2377,7 +2375,7 @@ final class ProofExecutionCoordinator
             ProofResolution resolution,
             ProofResolutionReason reason,
             Optional<ConnectionId> connectionId,
-            List<InteractionRef> interactions
+            List<ProofInteractionProvenance> provenance
         ) {
             this.resolution = Objects.requireNonNull(resolution, "resolution must not be null");
             this.reason = Objects.requireNonNull(reason, "reason must not be null");
@@ -2385,8 +2383,8 @@ final class ProofExecutionCoordinator
                 connectionId,
                 "connectionId must not be null"
             );
-            this.interactions = List.copyOf(
-                Objects.requireNonNull(interactions, "interactions must not be null")
+            this.provenance = List.copyOf(
+                Objects.requireNonNull(provenance, "provenance must not be null")
             );
         }
 
@@ -2398,7 +2396,7 @@ final class ProofExecutionCoordinator
                 resolution,
                 reason,
                 connectionId,
-                interactions
+                provenance
             );
         }
     }

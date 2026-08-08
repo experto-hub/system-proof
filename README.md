@@ -138,8 +138,11 @@ completed stimulus and every declared item to be `SATISFIED`; evaluating before 
 stimulus is rejected. Silence, timeout, missing or ambiguous correlation, unsupported coverage,
 and an unreached control remain inconclusive. Framework trust failures are errors. An authoritative
 early-successor guard violation remains a violation even if cleanup later fails. The compact result
-report is detached, bounded, deterministic, and type-only for failures. Its resolutions retain
-safe typed requirement descriptors. Evidence belongs to an execution only when its observation-
+report is detached, bounded, deterministic, and type-only for failures. Its resolutions retain safe
+typed requirement descriptors and role-aware detached interaction provenance (`CORRELATION`,
+`HOLD`, `PREDECESSOR`, or `SUCCESSOR`). Public semantic-control roots are delivered independently
+on bounded daemon tasks after mandatory framework actions; arbitrary dependent execution order is
+not a contract. Evidence belongs to an execution only when its observation-
 allocated interaction identity is after the atomically captured activation watermark; delayed
 callback delivery cannot move older traffic into the proof window, and post-watermark recording
 cannot publish into a separate pre-`ACTIVE` gap. The proof deadline also bounds

@@ -2,7 +2,12 @@ package io.github.jacekkardys.systemproof.control;
 
 import java.util.concurrent.CompletionStage;
 
-/** One environment-owned, one-shot semantic predecessor guard handle. */
+/**
+ * One environment-owned, one-shot semantic predecessor guard handle.
+ *
+ * <p>The public completion root is delivered after its framework state transition and never runs
+ * synchronous dependents on the transition owner.
+ */
 public interface SemanticPredecessorGuard {
     SemanticPredecessorGuardRef ref();
 

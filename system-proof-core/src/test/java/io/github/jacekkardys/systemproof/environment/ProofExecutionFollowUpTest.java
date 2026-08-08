@@ -28,6 +28,7 @@ import io.github.jacekkardys.systemproof.proof.ProofEvaluationResolution;
 import io.github.jacekkardys.systemproof.proof.ProofEvaluationState;
 import io.github.jacekkardys.systemproof.proof.ProofExecution;
 import io.github.jacekkardys.systemproof.proof.ProofFailureStage;
+import io.github.jacekkardys.systemproof.proof.ProofInteractionProvenance;
 import io.github.jacekkardys.systemproof.proof.ProofObligationId;
 import io.github.jacekkardys.systemproof.proof.ProofObligationResolution;
 import io.github.jacekkardys.systemproof.proof.ProofOutcome;
@@ -502,7 +503,7 @@ class ProofExecutionFollowUpTest {
                 ProofResolution.SATISFIED,
                 ProofResolutionReason.CORRELATION_UNIQUE,
                 Optional.of(harness.connectionId),
-                List.of(otherInteraction)
+                List.of(ProofInteractionProvenance.correlation(otherInteraction))
             )).isInstanceOf(IllegalArgumentException.class);
 
             assertThatThrownBy(() -> new ProofObligationResolution(
@@ -516,7 +517,7 @@ class ProofExecutionFollowUpTest {
                 ProofResolution.VIOLATED,
                 ProofResolutionReason.CAUSAL_RELATION_VIOLATED,
                 Optional.of(harness.connectionId),
-                List.of(otherInteraction)
+                List.of(ProofInteractionProvenance.successor(otherInteraction))
             )).isInstanceOf(IllegalArgumentException.class);
 
             assertThatThrownBy(() -> new ProofObligationResolution(
@@ -686,7 +687,7 @@ class ProofExecutionFollowUpTest {
                     ProofResolution.VIOLATED,
                     ProofResolutionReason.CAUSAL_RELATION_VIOLATED,
                     Optional.of(connectionId),
-                    List.of(second)
+                    List.of(ProofInteractionProvenance.successor(second))
                 ));
             }
 
@@ -883,7 +884,7 @@ class ProofExecutionFollowUpTest {
             ProofResolution.VIOLATED,
             ProofResolutionReason.CAUSAL_RELATION_VIOLATED,
             Optional.of(harness.connectionId),
-            List.of(successor)
+            List.of(ProofInteractionProvenance.successor(successor))
         );
     }
 

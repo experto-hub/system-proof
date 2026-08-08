@@ -220,6 +220,8 @@ class CoreArchitectureTest {
         proof.ProofEvidenceKind
         proof.ProofExecutionState
         proof.ProofFailureStage
+        proof.ProofInteractionProvenance
+        proof.ProofInteractionProvenance$Role
         proof.ProofObligationId
         proof.ProofObligationResolution
         proof.ProofOutcome
@@ -392,6 +394,10 @@ class CoreArchitectureTest {
         proof.ProofFailureStage#OBSERVATION:proof.ProofFailureStage
         proof.ProofFailureStage#STIMULUS:proof.ProofFailureStage
         proof.ProofFailureStage#TEARDOWN:proof.ProofFailureStage
+        proof.ProofInteractionProvenance$Role#CORRELATION:proof.ProofInteractionProvenance$Role
+        proof.ProofInteractionProvenance$Role#HOLD:proof.ProofInteractionProvenance$Role
+        proof.ProofInteractionProvenance$Role#PREDECESSOR:proof.ProofInteractionProvenance$Role
+        proof.ProofInteractionProvenance$Role#SUCCESSOR:proof.ProofInteractionProvenance$Role
         proof.ProofOutcome#ERROR:proof.ProofOutcome
         proof.ProofOutcome#INCONCLUSIVE:proof.ProofOutcome
         proof.ProofOutcome#PROVED:proof.ProofOutcome

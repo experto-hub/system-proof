@@ -281,10 +281,10 @@ public final class ProofResult {
             resolution.connectionId().ifPresent(value ->
                 output.append(" connection=").append(value)
             );
-            if (!resolution.interactions().isEmpty()) {
-                output.append(" interactions=")
-                    .append(resolution.interactions().stream()
-                        .map(Object::toString)
+            if (!resolution.provenance().isEmpty()) {
+                output.append(" provenance=")
+                    .append(resolution.provenance().stream()
+                        .map(value -> value.role() + ":" + value.interaction())
                         .collect(Collectors.joining(",")));
             }
             output.append(lineSeparator);

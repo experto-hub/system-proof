@@ -1,9 +1,11 @@
 package io.github.jacekkardys.systemproof.proof;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import io.github.jacekkardys.systemproof.observation.InteractionRef;
+import io.github.jacekkardys.systemproof.proof.ProofInteractionProvenance.Role;
 import io.github.jacekkardys.systemproof.topology.ConnectionId;
 
 /** Detached typed resolution and bounded decisive provenance for one required plan item. */
@@ -14,9 +16,9 @@ public record ProofObligationResolution(
     ProofResolution resolution,
     ProofResolutionReason reason,
     Optional<ConnectionId> connectionId,
-    List<InteractionRef> interactions
+    List<ProofInteractionProvenance> provenance
 ) {
-    private static final int MAX_INTERACTIONS = 2;
+    private static final int MAXIMUM_PROVENANCE = 2;
 
     public ProofObligationResolution {
         id = Objects.requireNonNull(id, "id must not be null");
@@ -30,19 +32,32 @@ public record ProofObligationResolution(
         resolution = Objects.requireNonNull(resolution, "resolution must not be null");
         reason = Objects.requireNonNull(reason, "reason must not be null");
         connectionId = Objects.requireNonNull(connectionId, "connectionId must not be null");
-        interactions = List.copyOf(
-            Objects.requireNonNull(interactions, "interactions must not be null")
-        );
-        if (interactions.stream().anyMatch(Objects::isNull)) {
-            throw new NullPointerException("interactions must not contain null");
+        provenance = List.copyOf(Objects.requireNonNull(
+            provenance,
+            "provenance must not be null"
+        ));
+        if (provenance.stream().anyMatch(Objects::isNull)) {
+            throw new NullPointerException("provenance must not contain null");
         }
-        if (interactions.size() > MAX_INTERACTIONS) {
+        if (provenance.size() > MAXIMUM_PROVENANCE) {
             throw new IllegalArgumentException(
-                "A proof resolution retains at most " + MAX_INTERACTIONS
+                "A proof resolution retains at most " + MAXIMUM_PROVENANCE
                     + " decisive interaction references"
             );
         }
-        validateCompatibility(descriptor, resolution, reason, connectionId, interactions);
+        if (new HashSet<>(provenance.stream()
+            .map(ProofInteractionProvenance::interaction)
+            .toList()).size() != provenance.size()) {
+            throw new IllegalArgumentException(
+                "A proof resolution cannot retain a duplicate interaction reference"
+            );
+        }
+        validateCompatibility(descriptor, resolution, reason, connectionId, provenance);
+    }
+
+    /** Detached references in provenance order, retained for convenient inspection. */
+    public List<InteractionRef> interactions() {
+        return provenance.stream().map(ProofInteractionProvenance::interaction).toList();
     }
 
     private static void validateCompatibility(
@@ -50,24 +65,23 @@ public record ProofObligationResolution(
         ProofResolution resolution,
         ProofResolutionReason reason,
         Optional<ConnectionId> connectionId,
-        List<InteractionRef> interactions
+        List<ProofInteractionProvenance> provenance
     ) {
         if (resolution == ProofResolution.NOT_EVALUATED
             || reason == ProofResolutionReason.NOT_EVALUATED_AFTER_TERMINAL_OUTCOME) {
             require(
                 resolution == ProofResolution.NOT_EVALUATED
-                    && reason
-                        == ProofResolutionReason.NOT_EVALUATED_AFTER_TERMINAL_OUTCOME
-                    && interactions.isEmpty(),
-                "NOT_EVALUATED requires its exact terminal reason without interactions"
+                    && reason == ProofResolutionReason.NOT_EVALUATED_AFTER_TERMINAL_OUTCOME
+                    && provenance.isEmpty(),
+                "NOT_EVALUATED requires its exact terminal reason without provenance"
             );
             validateOptionalConnection(descriptor, connectionId);
             return;
         }
         if (reason == ProofResolutionReason.ACTIVATION_NOT_REACHED) {
             require(
-                resolution == ProofResolution.UNREACHED && interactions.isEmpty(),
-                "ACTIVATION_NOT_REACHED requires an unreached item without interactions"
+                resolution == ProofResolution.UNREACHED && provenance.isEmpty(),
+                "ACTIVATION_NOT_REACHED requires an unreached item without provenance"
             );
             validateOptionalConnection(descriptor, connectionId);
             return;
@@ -78,7 +92,7 @@ public record ProofObligationResolution(
         );
         switch (descriptor) {
             case ProofRequirementDescriptor.Prerequisite value -> {
-                require(connectionId.isEmpty() && interactions.isEmpty(),
+                require(connectionId.isEmpty() && provenance.isEmpty(),
                     "A prerequisite cannot retain connection or interaction provenance");
                 boolean valid = switch (value.expectedStatus()) {
                     case SATISFIED -> resolution == ProofResolution.SATISFIED
@@ -91,7 +105,8 @@ public record ProofObligationResolution(
                 require(valid, "Prerequisite status, resolution, and reason must agree");
             }
             case ProofRequirementDescriptor.Observation value -> {
-                requireConnection(value.connectionId(), connectionId, interactions, false);
+                requireConnection(value.connectionId(), connectionId);
+                require(provenance.isEmpty(), "An observation cannot retain interaction provenance");
                 require(
                     matches(resolution, reason,
                         ProofResolution.SATISFIED, ProofResolutionReason.OBSERVATION_ACTIVE,
@@ -102,67 +117,94 @@ public record ProofObligationResolution(
                 );
             }
             case ProofRequirementDescriptor.Correlation value -> {
-                requireConnection(value.connectionId(), connectionId, interactions, true);
+                requireConnection(value.connectionId(), connectionId);
                 boolean valid = resolution == ProofResolution.SATISFIED
                         && reason == ProofResolutionReason.CORRELATION_UNIQUE
-                        && interactions.size() == 1
+                        && exactSingle(provenance, Role.CORRELATION, value.connectionId())
                     || resolution == ProofResolution.MISSING
                         && reason == ProofResolutionReason.CORRELATION_MISSING
-                        && interactions.isEmpty()
+                        && provenance.isEmpty()
                     || resolution == ProofResolution.AMBIGUOUS
                         && reason == ProofResolutionReason.CORRELATION_AMBIGUOUS
-                        && interactions.isEmpty();
+                        && provenance.isEmpty();
                 require(valid, "Correlation resolution, reason, and provenance must agree");
             }
-            case ProofRequirementDescriptor.HoldControl value -> {
-                require(
-                    value.expectedState()
-                        == io.github.jacekkardys.systemproof.control.SemanticHoldState.FORWARDED,
-                    "A hold-control proof descriptor requires FORWARDED"
-                );
-                requireConnection(value.connectionId(), connectionId, interactions, true);
-                require(
-                    matches(resolution, reason,
-                        ProofResolution.SATISFIED,
-                            ProofResolutionReason.CONTROL_REACHED_EXPECTED_STATE,
-                        ProofResolution.UNREACHED, ProofResolutionReason.CONTROL_UNREACHED,
-                        ProofResolution.TIMED_OUT, ProofResolutionReason.CONTROL_TIMED_OUT,
-                        ProofResolution.AMBIGUOUS,
-                            ProofResolutionReason.CONTROL_CORRELATION_INVALIDATED,
-                        ProofResolution.MISSING, ProofResolutionReason.CONTROL_SESSION_ENDED,
-                        ProofResolution.FAILED, ProofResolutionReason.CONTROL_FAILED),
-                    "Hold-control resolution and reason must agree"
-                );
-            }
+            case ProofRequirementDescriptor.HoldControl value ->
+                validateHoldControl(value, resolution, reason, connectionId, provenance);
             case ProofRequirementDescriptor.GuardControl value ->
-                validateGuardControl(value, resolution, reason, connectionId, interactions);
+                validateGuardControl(value, resolution, reason, connectionId, provenance);
             case ProofRequirementDescriptor.HoldEvidence value -> {
-                requireConnection(value.connectionId(), connectionId, interactions, true);
+                requireConnection(value.connectionId(), connectionId);
+                require(
+                    value.evidenceKind() == ProofEvidenceKind.HELD_INTERACTION,
+                    "Hold evidence requires HELD_INTERACTION"
+                );
                 require(
                     resolution == ProofResolution.SATISFIED
                         && reason == ProofResolutionReason.EVIDENCE_PRESENT
-                        && interactions.size() == 1
+                        && exactSingle(provenance, Role.HOLD, value.connectionId())
                     || resolution == ProofResolution.MISSING
                         && reason == ProofResolutionReason.EVIDENCE_MISSING
-                        && interactions.isEmpty(),
+                        && provenance.isEmpty(),
                     "Hold-evidence resolution, reason, and provenance must agree"
                 );
             }
             case ProofRequirementDescriptor.GuardEvidence value -> {
-                requireConnection(value.connectionId(), connectionId, interactions, true);
+                requireConnection(value.connectionId(), connectionId);
+                Role expectedRole = switch (value.evidenceKind()) {
+                    case PREDECESSOR_INTERACTION -> Role.PREDECESSOR;
+                    case SUCCESSOR_INTERACTION -> Role.SUCCESSOR;
+                    case HELD_INTERACTION -> throw new IllegalArgumentException(
+                        "Guard evidence cannot require a held interaction"
+                    );
+                };
                 require(
                     resolution == ProofResolution.SATISFIED
                         && reason == ProofResolutionReason.EVIDENCE_PRESENT
-                        && interactions.size() == 1
+                        && exactSingle(provenance, expectedRole, value.connectionId())
                     || resolution == ProofResolution.MISSING
                         && reason == ProofResolutionReason.EVIDENCE_MISSING
-                        && interactions.isEmpty(),
+                        && provenance.isEmpty(),
                     "Guard-evidence resolution, reason, and provenance must agree"
                 );
             }
             case ProofRequirementDescriptor.CausalRelation value ->
-                validateRelation(value, resolution, reason, connectionId, interactions);
+                validateRelation(value, resolution, reason, connectionId, provenance);
         }
+    }
+
+    private static void validateHoldControl(
+        ProofRequirementDescriptor.HoldControl descriptor,
+        ProofResolution resolution,
+        ProofResolutionReason reason,
+        Optional<ConnectionId> connectionId,
+        List<ProofInteractionProvenance> provenance
+    ) {
+        require(
+            descriptor.expectedState()
+                == io.github.jacekkardys.systemproof.control.SemanticHoldState.FORWARDED,
+            "A hold-control proof descriptor requires FORWARDED"
+        );
+        requireConnection(descriptor.connectionId(), connectionId);
+        require(
+            matches(resolution, reason,
+                ProofResolution.SATISFIED,
+                    ProofResolutionReason.CONTROL_REACHED_EXPECTED_STATE,
+                ProofResolution.UNREACHED, ProofResolutionReason.CONTROL_UNREACHED,
+                ProofResolution.TIMED_OUT, ProofResolutionReason.CONTROL_TIMED_OUT,
+                ProofResolution.AMBIGUOUS,
+                    ProofResolutionReason.CONTROL_CORRELATION_INVALIDATED,
+                ProofResolution.MISSING, ProofResolutionReason.CONTROL_SESSION_ENDED,
+                ProofResolution.FAILED, ProofResolutionReason.CONTROL_FAILED),
+            "Hold-control resolution and reason must agree"
+        );
+        boolean exactHold = exactSingle(provenance, Role.HOLD, descriptor.connectionId());
+        require(
+            resolution == ProofResolution.UNREACHED
+                ? provenance.isEmpty() || exactHold
+                : exactHold,
+            "Hold-control provenance must represent exactly its reachable hold progress"
+        );
     }
 
     private static void validateGuardControl(
@@ -170,7 +212,7 @@ public record ProofObligationResolution(
         ProofResolution resolution,
         ProofResolutionReason reason,
         Optional<ConnectionId> connectionId,
-        List<InteractionRef> interactions
+        List<ProofInteractionProvenance> provenance
     ) {
         require(
             descriptor.expectedState()
@@ -186,11 +228,11 @@ public record ProofObligationResolution(
                 descriptor.predecessorConnectionId(),
                 descriptor.successorConnectionId(),
                 connectionId,
-                interactions
+                provenance
             );
             return;
         }
-        require(connectionId.isEmpty(), "A non-violated cross-connection guard has no single connection");
+        require(connectionId.isEmpty(), "A non-violated guard has no single connection");
         require(
             matches(resolution, reason,
                 ProofResolution.SATISFIED,
@@ -207,15 +249,15 @@ public record ProofObligationResolution(
             requireEstablishedProvenance(
                 descriptor.predecessorConnectionId(),
                 descriptor.successorConnectionId(),
-                interactions
+                provenance
             );
         } else if (resolution == ProofResolution.TIMED_OUT) {
-            requirePartialProvenance(descriptor.predecessorConnectionId(), interactions);
+            requirePartialProvenance(descriptor.predecessorConnectionId(), provenance);
         } else {
             requireNonViolatedTerminalProvenance(
                 descriptor.predecessorConnectionId(),
                 descriptor.successorConnectionId(),
-                interactions
+                provenance
             );
         }
     }
@@ -225,7 +267,7 @@ public record ProofObligationResolution(
         ProofResolution resolution,
         ProofResolutionReason reason,
         Optional<ConnectionId> connectionId,
-        List<InteractionRef> interactions
+        List<ProofInteractionProvenance> provenance
     ) {
         if (resolution == ProofResolution.VIOLATED) {
             require(
@@ -236,7 +278,7 @@ public record ProofObligationResolution(
                 descriptor.predecessorConnectionId(),
                 descriptor.successorConnectionId(),
                 connectionId,
-                interactions
+                provenance
             );
             return;
         }
@@ -246,16 +288,16 @@ public record ProofObligationResolution(
                 && reason == ProofResolutionReason.CAUSAL_RELATION_ESTABLISHED
             || resolution == ProofResolution.UNREACHED
                 && reason == ProofResolutionReason.CAUSAL_RELATION_UNREACHED,
-            "Causal-relation resolution, reason, and provenance must agree"
+            "Causal-relation resolution and reason must agree"
         );
         if (resolution == ProofResolution.SATISFIED) {
             requireEstablishedProvenance(
                 descriptor.predecessorConnectionId(),
                 descriptor.successorConnectionId(),
-                interactions
+                provenance
             );
         } else {
-            requirePartialProvenance(descriptor.predecessorConnectionId(), interactions);
+            requirePartialProvenance(descriptor.predecessorConnectionId(), provenance);
         }
     }
 
@@ -263,63 +305,77 @@ public record ProofObligationResolution(
         ConnectionId predecessor,
         ConnectionId successor,
         Optional<ConnectionId> connectionId,
-        List<InteractionRef> interactions
+        List<ProofInteractionProvenance> provenance
     ) {
         require(connectionId.filter(successor::equals).isPresent(),
             "A violated relation requires exact successor connection provenance");
-        require(!interactions.isEmpty() && interactions.size() <= 2,
-            "A violated relation requires its exact successor interaction");
-        validateViolationProvenance(predecessor, successor, interactions);
-        require(interactions.getLast().connectionId().equals(successor),
-            "The decisive violated interaction must belong to the successor connection");
+        require(
+            exactSingle(provenance, Role.SUCCESSOR, successor)
+                || exactPair(provenance, predecessor, successor),
+            "A violated relation requires an explicit successor interaction"
+        );
     }
 
     private static void requireEstablishedProvenance(
         ConnectionId predecessor,
         ConnectionId successor,
-        List<InteractionRef> interactions
+        List<ProofInteractionProvenance> provenance
     ) {
-        require(interactions.size() == 2
-                && interactions.getFirst().connectionId().equals(predecessor)
-                && interactions.getLast().connectionId().equals(successor),
-            "An established guard relation requires predecessor then successor provenance");
+        require(
+            exactPair(provenance, predecessor, successor),
+            "An established guard relation requires predecessor then successor provenance"
+        );
     }
 
     private static void requirePartialProvenance(
         ConnectionId predecessor,
-        List<InteractionRef> interactions
+        List<ProofInteractionProvenance> provenance
     ) {
-        require(interactions.isEmpty()
-                || interactions.size() == 1
-                    && interactions.getFirst().connectionId().equals(predecessor),
-            "A partial guard resolution may retain only its predecessor interaction");
+        require(
+            provenance.isEmpty() || exactSingle(provenance, Role.PREDECESSOR, predecessor),
+            "A partial guard resolution may retain only its predecessor interaction"
+        );
     }
 
     private static void requireNonViolatedTerminalProvenance(
         ConnectionId predecessor,
         ConnectionId successor,
-        List<InteractionRef> interactions
+        List<ProofInteractionProvenance> provenance
     ) {
-        require(interactions.isEmpty()
-                || interactions.size() == 1
-                    && interactions.getFirst().connectionId().equals(predecessor)
-                || interactions.size() == 2
-                    && interactions.getFirst().connectionId().equals(predecessor)
-                    && interactions.getLast().connectionId().equals(successor),
-            "A non-violated terminal guard may retain predecessor progress and its successor");
+        require(
+            provenance.isEmpty()
+                || exactSingle(provenance, Role.PREDECESSOR, predecessor)
+                || exactPair(provenance, predecessor, successor),
+            "A non-violated terminal guard may retain predecessor progress and its successor"
+        );
     }
 
-    private static void validateViolationProvenance(
-        ConnectionId predecessor,
-        ConnectionId successor,
-        List<InteractionRef> interactions
+    private static boolean exactSingle(
+        List<ProofInteractionProvenance> provenance,
+        Role role,
+        ConnectionId connectionId
     ) {
-        require(interactions.size() == 1
-                && interactions.getFirst().connectionId().equals(successor)
-                || interactions.size() == 2
-                    && interactions.getFirst().connectionId().equals(predecessor)
-                    && interactions.getLast().connectionId().equals(successor),
-            "A violated guard requires its successor, optionally after its predecessor");
+        return provenance.size() == 1
+            && exact(provenance.getFirst(), role, connectionId);
+    }
+
+    private static boolean exactPair(
+        List<ProofInteractionProvenance> provenance,
+        ConnectionId predecessor,
+        ConnectionId successor
+    ) {
+        return provenance.size() == 2
+            && exact(provenance.getFirst(), Role.PREDECESSOR, predecessor)
+            && exact(provenance.getLast(), Role.SUCCESSOR, successor);
+    }
+
+    private static boolean exact(
+        ProofInteractionProvenance provenance,
+        Role role,
+        ConnectionId connectionId
+    ) {
+        return provenance.role() == role
+            && provenance.interaction().connectionId().equals(connectionId);
     }
 
     private static void validateOptionalConnection(
@@ -351,16 +407,10 @@ public record ProofObligationResolution(
 
     private static void requireConnection(
         ConnectionId expected,
-        Optional<ConnectionId> actual,
-        List<InteractionRef> interactions,
-        boolean interactionsAllowed
+        Optional<ConnectionId> actual
     ) {
         require(actual.filter(expected::equals).isPresent(),
             "Resolution connection must match its descriptor");
-        require(interactionsAllowed || interactions.isEmpty(),
-            "This requirement cannot retain interaction provenance");
-        require(interactions.stream().allMatch(value -> value.connectionId().equals(expected)),
-            "Retained interactions must match the descriptor connection");
     }
 
     private static boolean matches(

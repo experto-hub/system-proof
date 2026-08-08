@@ -148,17 +148,23 @@ The closed outcomes are exactly:
   failed before a violation became terminal.
 
 Primary-outcome linearization and completion finalization are separate. The first terminal
-transition fixes the outcome and an immutable resolution/stimulus snapshot. Finalization then
-cancels the deadline and performs prepared-control state transitions without delivering public
-completion callbacks, catches every cleanup failure, deterministically orders and caps retained
-type-only secondary diagnostics at 32, and freezes exactly one result. Only after result publication
-does it deliver the queued control completions. Cleanup cannot escape or replace the primary
-outcome. Delivery is one ordered batch on an environment-owned daemon dispatcher with one worker
-and a queue bounded to one batch. Teardown interrupts it without waiting for arbitrary user code.
-A blocking or failing completion dependent therefore cannot hold the finalization owner, deadline
-worker, stimulus, result accessor, or environment close. Reentrant completion callbacks may call
-`result()` or `evaluate()` and receive the same already frozen object. Facts and callback failures
-after the freeze cannot mutate the public result.
+transition fixes the outcome and an immutable resolution/stimulus snapshot. Every semantic-control
+transition first performs mandatory internal actions, then submits each committed public completion
+root independently behind a publication gate. Proof finalization cancels the deadline, performs
+prepared-control transitions, catches cleanup failures, deterministically orders and caps retained
+type-only secondary diagnostics at 32, freezes one result, accepts all finalization-owned completion
+work, publishes that result, and only then opens the gate. Concurrent close waits for this
+framework-owned handoff before invoking delivery close; it never waits for callback execution.
+
+An environment execution accepts at most 256 controls and therefore at most 768 public roots. The
+environment-owned dispatcher starts one daemon virtual-thread task per root and has no work queue
+or persistent worker to shut down. Teardown still accepts bounded root outcomes from permits that
+were already in flight; no new controls can be declared.
+One blocked root cannot prevent later hold or guard roots from completing. Arbitrary user callback
+execution order is deliberately unspecified even though framework state transitions remain ordered.
+Rejection, thread-start, shutdown, and callback failures are contained and cannot replace an already
+fixed result or skip subsequent cleanup. Reentrant completion callbacks may call `result()` or
+`evaluate()` and receive the same frozen object.
 
 ## Result and report
 
@@ -169,14 +175,19 @@ unresolved/not-evaluated items, a type-only primary failure, and bounded seconda
 Every obligation resolution carries a detached typed descriptor of the exact prerequisite status,
 observation profile, correlation namespace, control reference and expected state, evidence kind,
 or causal-relation reference evaluated. Construction validates the complete descriptor-kind-
-resolution-reason-connection-interaction matrix. Only a guard control or causal relation may be
-`VIOLATED`, and both require the exact successor, optionally after the predecessor. A satisfied
-guard or established relation requires predecessor followed by successor. A non-violated partial
+resolution-reason-connection-provenance matrix. Provenance is role-aware and detached: correlation,
+hold, predecessor, and successor roles are explicit and are never inferred from connection identity.
+Only a guard control or causal relation may be `VIOLATED`, and both require an explicit successor,
+optionally after the predecessor. A satisfied guard or established relation requires a distinct
+predecessor followed by a distinct successor, including when both use the same connection. A
+non-violated partial
 terminal control may retain no interaction, its exact predecessor only, or—for a terminal event
 after successor authorization—the exact predecessor/successor pair. A timeout cannot retain the
 pair because authorization cancels its timer. Successor-only timeout, cancellation, ambiguity,
-missing-session, or failure provenance is rejected. `NOT_EVALUATED` has one exact terminal reason
-and no interaction provenance. Satisfied items remain satisfied after an independent
+missing-session, or failure provenance, duplicate references, and reversed roles are rejected. A
+satisfied hold and every reached terminal hold retain exactly one `HOLD` reference; only an
+unreached cancellation may have no interaction. `NOT_EVALUATED` has one exact terminal reason and
+no provenance. Satisfied items remain satisfied after an independent
 decisive item regardless of declaration order. Its
 deterministic compact `ProofReport` is limited to 64 KiB characters. The outcome and decisive
 reason are rendered before truncatable obligation detail, so they survive worst-case truncation.

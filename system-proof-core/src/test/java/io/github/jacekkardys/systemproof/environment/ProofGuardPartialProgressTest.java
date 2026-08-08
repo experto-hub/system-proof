@@ -15,6 +15,7 @@ import io.github.jacekkardys.systemproof.observation.ForwardingPermit;
 import io.github.jacekkardys.systemproof.observation.InteractionRef;
 import io.github.jacekkardys.systemproof.observation.SessionId;
 import io.github.jacekkardys.systemproof.proof.ProofExecution;
+import io.github.jacekkardys.systemproof.proof.ProofInteractionProvenance;
 import io.github.jacekkardys.systemproof.proof.ProofObligationId;
 import io.github.jacekkardys.systemproof.proof.ProofObligationResolution;
 import io.github.jacekkardys.systemproof.proof.ProofOutcome;
@@ -159,19 +160,25 @@ class ProofGuardPartialProgressTest {
                 descriptor,
                 ProofResolution.TIMED_OUT,
                 ProofResolutionReason.CONTROL_TIMED_OUT,
-                List.of(successorInteraction)
+                List.of(ProofInteractionProvenance.successor(successorInteraction))
             )).isInstanceOf(IllegalArgumentException.class);
             assertThatThrownBy(() -> guardResolution(
                 descriptor,
                 ProofResolution.SATISFIED,
                 ProofResolutionReason.CONTROL_REACHED_EXPECTED_STATE,
-                List.of(successorInteraction, predecessorInteraction)
+                List.of(
+                    ProofInteractionProvenance.successor(successorInteraction),
+                    ProofInteractionProvenance.predecessor(predecessorInteraction)
+                )
             )).isInstanceOf(IllegalArgumentException.class);
             assertThatThrownBy(() -> guardResolution(
                 descriptor,
                 ProofResolution.TIMED_OUT,
                 ProofResolutionReason.CONTROL_TIMED_OUT,
-                List.of(predecessorInteraction, successorInteraction)
+                List.of(
+                    ProofInteractionProvenance.predecessor(predecessorInteraction),
+                    ProofInteractionProvenance.successor(successorInteraction)
+                )
             )).isInstanceOf(IllegalArgumentException.class);
         }
     }
@@ -274,7 +281,7 @@ class ProofGuardPartialProgressTest {
         ProofRequirementDescriptor.GuardControl descriptor,
         ProofResolution resolution,
         ProofResolutionReason reason,
-        List<InteractionRef> interactions
+        List<ProofInteractionProvenance> provenance
     ) {
         return new ProofObligationResolution(
             new ProofObligationId("forged-guard-provenance"),
@@ -283,7 +290,7 @@ class ProofGuardPartialProgressTest {
             resolution,
             reason,
             Optional.empty(),
-            interactions
+            provenance
         );
     }
 }

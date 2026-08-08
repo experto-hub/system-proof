@@ -216,7 +216,8 @@ remove the marker, and unrelated connections remain independent.
   `ProofResolution`, `ProofResolutionReason`, `ProofRequirementKind`, `ProofEvidenceKind`,
   `ProofPrerequisiteStatus`, `ProofDiagnostic`, `ProofRequirementDescriptor` and its typed records,
   `ProofStimulusState`, `ProofStimulusResolution`, `ProofEvaluationState`,
-  `ProofEvaluationResolution`, `ProofObligationResolution`, `ProofReport`, and `ProofResult`.
+  `ProofEvaluationResolution`, `ProofInteractionProvenance` and its `Role`,
+  `ProofObligationResolution`, `ProofReport`, and `ProofResult`.
 - Topology inspection: `CompatibilityResult`, `ConnectionDescriptor`, `ConnectionId`,
   `ConnectionRef`, `PortDirection`, `PortRef`.
 

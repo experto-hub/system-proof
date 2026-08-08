@@ -55,6 +55,16 @@ final class ProofRuntimeHarness implements AutoCloseable {
         SemanticControlCoordinator.TimeoutScheduler controlTimeouts,
         BoundaryHooks boundaryHooks
     ) {
+        this(deadlineScheduler, evaluator, controlTimeouts, boundaryHooks, null);
+    }
+
+    private ProofRuntimeHarness(
+        ManualDeadlineScheduler deadlineScheduler,
+        ProofOutcomeEvaluator evaluator,
+        SemanticControlCoordinator.TimeoutScheduler controlTimeouts,
+        BoundaryHooks boundaryHooks,
+        SemanticControlCoordinator.CompletionDispatcher completionDispatcher
+    ) {
         deadlines = java.util.Objects.requireNonNull(
             deadlineScheduler,
             "deadlineScheduler must not be null"
@@ -114,13 +124,22 @@ final class ProofRuntimeHarness implements AutoCloseable {
         proofSubjects = new ProofSubjectRegistry(events);
         SemanticControlCapabilityRegistry capabilities =
             new SemanticControlCapabilityRegistry();
-        controls = new SemanticControlCoordinator(
-            events,
-            proofSubjects,
-            capabilities,
-            controlTimeouts,
-            observedProofState
-        );
+        controls = completionDispatcher == null
+            ? new SemanticControlCoordinator(
+                events,
+                proofSubjects,
+                capabilities,
+                controlTimeouts,
+                observedProofState
+            )
+            : new SemanticControlCoordinator(
+                events,
+                proofSubjects,
+                capabilities,
+                controlTimeouts,
+                observedProofState,
+                completionDispatcher
+            );
         connections = new RuntimeConnectionRegistry(
             topology.connections(),
             events,
@@ -239,6 +258,18 @@ final class ProofRuntimeHarness implements AutoCloseable {
             ProofOutcomeEvaluator.failClosed(),
             new PassiveControlTimeoutScheduler(),
             hooks
+        );
+    }
+
+    static ProofRuntimeHarness startWithCompletionDispatcher(
+        SemanticControlCoordinator.CompletionDispatcher completionDispatcher
+    ) {
+        return new ProofRuntimeHarness(
+            new ManualDeadlineScheduler(),
+            ProofOutcomeEvaluator.failClosed(),
+            new PassiveControlTimeoutScheduler(),
+            BoundaryHooks.NONE,
+            completionDispatcher
         );
     }
 

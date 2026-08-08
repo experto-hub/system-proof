@@ -71,7 +71,8 @@ adapter, throwable, or protocol object.
 
 Activation validates exact environment ownership and static profile/schema/capability coverage,
 samples fresh observation state, and arms all prepared controls before the evidence window becomes
-`ACTIVE`. Partial arming is rolled back without forwarding protected traffic. Unsupported runtime
+`ACTIVE`. An execution may declare at most 256 semantic controls; this bound also caps public
+completion delivery. Partial arming is rolled back without forwarding protected traffic. Unsupported runtime
 coverage completes `INCONCLUSIVE`; malformed plans throw `ProofConfigurationException`; internal
 activation failure completes `ERROR`. In every pre-stimulus outcome the stimulus callback is not
 invoked. The observation owner records each allocated `InteractionRef` before journal publication
@@ -93,10 +94,13 @@ not change the primary outcome. The deadline crosses the same control/observatio
 boundary as explicit evaluation and always yields a typed `INCONCLUSIVE` evaluation gap unless an
 earlier violation or error already won. Required observation refresh is single-flight and bounded
 by that deadline; teardown never waits for a blocked provider, and a late refresh is discarded.
-Finalization performs internal cleanup, freezes exactly one result, then delivers public control
-completion callbacks as one ordered batch on a bounded daemon dispatcher. Blocking or failing
-dependents cannot hold proof finalization or teardown, and reentrant result/evaluation access sees
-the frozen object. At most 32 later
+Every semantic-control transition separates deterministic internal actions from user-visible stage
+completion. Each committed public root is accepted by an environment-owned dispatcher as a
+separate daemon virtual-thread task; at most 768 roots exist for the 256-control lifetime bound.
+There is no delivery queue and callback execution order is unspecified. A publication gate keeps
+terminal callbacks behind immutable result publication, while close waits only for submission and
+state handoff, never for user code. Blocking or failing dependents therefore cannot hold protocol
+decisions, stimulus, proof finalization, unrelated roots, or teardown. At most 32 later
 type-only diagnostics may be retained, and repeated evaluation/result access returns the same
 immutable object. An unfinished active execution makes environment teardown fail. The deterministic
 compact report is capped at 64 KiB and never renders payloads, evidence bytes, native references,

@@ -12,6 +12,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -49,6 +50,8 @@ final class SemanticControlCoordinator
     implements SemanticControls, InteractionDecisionCoordinator {
 
     private static final long FIRST_CONTROL_VALUE = 1L;
+    private static final int MAXIMUM_CONTROLS = 256;
+    private static final int MAXIMUM_PUBLIC_COMPLETIONS = MAXIMUM_CONTROLS * 3;
     private static final ForwardingPermit IMMEDIATE_FORWARD =
         new TerminalPermit(ForwardingDecision.FORWARD);
     private static final ForwardingPermit CLOSE_SESSION =
@@ -61,6 +64,7 @@ final class SemanticControlCoordinator
     private final SemanticControlCapabilityRegistry controlCapabilities;
     private final TimeoutScheduler timeoutScheduler;
     private final ProofObservationListener proofObservations;
+    private final CompletionDispatcher completionDispatcher;
     private final Map<RuntimeSemanticHoldRef, HoldEntry> activeHolds =
         new LinkedHashMap<>();
     private final Map<RuntimeSemanticHoldRef, HoldEntry> allHolds =
@@ -85,7 +89,8 @@ final class SemanticControlCoordinator
             proofSubjects,
             controlCapabilities,
             new SystemTimeoutScheduler(),
-            ProofObservationListener.NONE
+            ProofObservationListener.NONE,
+            new SystemCompletionDispatcher()
         );
     }
 
@@ -100,7 +105,8 @@ final class SemanticControlCoordinator
             proofSubjects,
             controlCapabilities,
             new SystemTimeoutScheduler(),
-            proofObservations
+            proofObservations,
+            new SystemCompletionDispatcher()
         );
     }
 
@@ -115,7 +121,8 @@ final class SemanticControlCoordinator
             proofSubjects,
             controlCapabilities,
             timeoutScheduler,
-            ProofObservationListener.NONE
+            ProofObservationListener.NONE,
+            new SystemCompletionDispatcher()
         );
     }
 
@@ -125,6 +132,24 @@ final class SemanticControlCoordinator
         SemanticControlCapabilityRegistry controlCapabilities,
         TimeoutScheduler timeoutScheduler,
         ProofObservationListener proofObservations
+    ) {
+        this(
+            events,
+            proofSubjects,
+            controlCapabilities,
+            timeoutScheduler,
+            proofObservations,
+            new SystemCompletionDispatcher()
+        );
+    }
+
+    SemanticControlCoordinator(
+        EnvironmentEventPublisher events,
+        ProofSubjectRegistry proofSubjects,
+        SemanticControlCapabilityRegistry controlCapabilities,
+        TimeoutScheduler timeoutScheduler,
+        ProofObservationListener proofObservations,
+        CompletionDispatcher completionDispatcher
     ) {
         this.events = Objects.requireNonNull(events, "events must not be null");
         this.proofSubjects = Objects.requireNonNull(
@@ -143,6 +168,10 @@ final class SemanticControlCoordinator
             proofObservations,
             "proofObservations must not be null"
         );
+        this.completionDispatcher = Objects.requireNonNull(
+            completionDispatcher,
+            "completionDispatcher must not be null"
+        );
     }
 
     @Override
@@ -157,6 +186,7 @@ final class SemanticControlCoordinator
         );
         synchronized (this) {
             requireAccepting();
+            requireControlCapacity();
             validateSelector(selector);
             RuntimeSemanticHoldRef ref = nextHoldReference();
             HoldEntry entry = new HoldEntry(ref, selector, maximumHoldDuration);
@@ -175,6 +205,7 @@ final class SemanticControlCoordinator
         );
         synchronized (this) {
             requireAccepting();
+            requireControlCapacity();
             proofSubjects.validateSubject(specification.subject());
             validateSelector(specification.predecessor().selector());
             validateSelector(specification.successor());
@@ -238,7 +269,7 @@ final class SemanticControlCoordinator
             evidenceWindowBoundary,
             "evidenceWindowBoundary must not be null"
         );
-        List<Runnable> afterTransition = new ArrayList<>();
+        AfterTransition afterTransition = new AfterTransition();
         Throwable activationFailure = null;
         synchronized (this) {
             requireAccepting();
@@ -321,8 +352,7 @@ final class SemanticControlCoordinator
             holdRefs,
             guardRefs
         );
-        proofObservations.finalizePending();
-        cancellation.deliver();
+        runAfterTransition(cancellation.actions());
         cancellation.rethrowFirstFailure();
     }
 
@@ -330,7 +360,7 @@ final class SemanticControlCoordinator
         List<SemanticHoldRef> holdRefs,
         List<SemanticPredecessorGuardRef> guardRefs
     ) {
-        List<Runnable> afterTransition = new ArrayList<>();
+        AfterTransition afterTransition = new AfterTransition();
         List<Throwable> failures = new ArrayList<>();
         synchronized (this) {
             for (HoldEntry entry : distinctHolds(holdRefs)) {
@@ -392,7 +422,7 @@ final class SemanticControlCoordinator
     @Override
     public ForwardingPermit permit(RecordedInteraction interaction) {
         interaction = Objects.requireNonNull(interaction, "interaction must not be null");
-        List<Runnable> afterTransition = new ArrayList<>();
+        AfterTransition afterTransition = new AfterTransition();
         ForwardingPermit permit;
         synchronized (this) {
             permit = decideLocked(interaction, afterTransition);
@@ -404,7 +434,7 @@ final class SemanticControlCoordinator
     @Override
     public void observationFailed(ConnectionId connectionId) {
         connectionId = Objects.requireNonNull(connectionId, "connectionId must not be null");
-        List<Runnable> afterTransition = new ArrayList<>();
+        AfterTransition afterTransition = new AfterTransition();
         synchronized (this) {
             failedRequiredObservationConnections.add(connectionId);
             proofObservations.requiredObservationFailed(connectionId);
@@ -437,7 +467,7 @@ final class SemanticControlCoordinator
 
     private ForwardingPermit decideLocked(
         RecordedInteraction interaction,
-        List<Runnable> afterTransition
+        AfterTransition afterTransition
     ) {
         List<GuardUse> forwardedPredecessors = observePredecessorsLocked(
             interaction,
@@ -516,7 +546,7 @@ final class SemanticControlCoordinator
 
     private List<GuardUse> observePredecessorsLocked(
         RecordedInteraction interaction,
-        List<Runnable> afterTransition
+        AfterTransition afterTransition
     ) {
         List<GuardUse> forwardedPredecessors = new ArrayList<>();
         for (GuardEntry entry : guards.values()) {
@@ -562,7 +592,7 @@ final class SemanticControlCoordinator
 
     private GuardDecision decideGuardSuccessorsLocked(
         RecordedInteraction interaction,
-        List<Runnable> afterTransition
+        AfterTransition afterTransition
     ) {
         List<GuardUse> authorized = new ArrayList<>();
         boolean close = false;
@@ -626,7 +656,7 @@ final class SemanticControlCoordinator
 
     private HoldMatch selectHoldLocked(
         RecordedInteraction interaction,
-        List<Runnable> afterTransition
+        AfterTransition afterTransition
     ) {
         List<HoldSelection> matches = new ArrayList<>();
         for (HoldEntry entry : activeHolds.values()) {
@@ -674,13 +704,13 @@ final class SemanticControlCoordinator
         HoldEntry entry,
         SelectorSelection selection,
         RecordedInteraction interaction,
-        List<Runnable> afterTransition
+        AfterTransition afterTransition
     ) {
         entry.interactionRef = interaction.interactionRef();
         entry.selection = selection;
         transitionHoldLocked(entry, SemanticHoldState.REACHED_HELD, Optional.empty());
         entry.reachedEstablished = true;
-        afterTransition.add(() -> entry.reached.complete(entry.interactionRef));
+        afterTransition.addPublic(() -> entry.reached.complete(entry.interactionRef));
         try {
             TimeoutTask scheduled = timeoutScheduler.schedule(
                 entry.maximumHoldDuration,
@@ -783,7 +813,7 @@ final class SemanticControlCoordinator
     }
 
     private CompletionStage<Void> release(HoldEntry entry) {
-        List<Runnable> afterTransition = new ArrayList<>();
+        AfterTransition afterTransition = new AfterTransition();
         CompletionStage<Void> result;
         synchronized (this) {
             if (entry.state != SemanticHoldState.REACHED_HELD) {
@@ -801,7 +831,7 @@ final class SemanticControlCoordinator
             } else {
                 transitionHoldLocked(entry, SemanticHoldState.RELEASING, Optional.empty());
                 cancelTimeout(entry);
-                afterTransition.add(
+                afterTransition.addInternal(
                     () -> entry.permit.authorize(ForwardingDecision.FORWARD)
                 );
             }
@@ -811,7 +841,7 @@ final class SemanticControlCoordinator
     }
 
     private boolean cancel(HoldEntry entry) {
-        List<Runnable> afterTransition = new ArrayList<>();
+        AfterTransition afterTransition = new AfterTransition();
         synchronized (this) {
             if (entry.state != SemanticHoldState.DECLARED
                 && entry.state != SemanticHoldState.ARMED
@@ -830,7 +860,7 @@ final class SemanticControlCoordinator
     }
 
     private boolean cancel(GuardEntry entry) {
-        List<Runnable> afterTransition = new ArrayList<>();
+        AfterTransition afterTransition = new AfterTransition();
         synchronized (this) {
             if (entry.state != SemanticPredecessorGuardState.DECLARED
                 && !guardAwaitsTimedBoundary(entry.state)) {
@@ -848,7 +878,7 @@ final class SemanticControlCoordinator
     }
 
     private void timeout(HoldEntry entry) {
-        List<Runnable> afterTransition = new ArrayList<>();
+        AfterTransition afterTransition = new AfterTransition();
         synchronized (this) {
             if (entry.state != SemanticHoldState.REACHED_HELD) {
                 return;
@@ -864,7 +894,7 @@ final class SemanticControlCoordinator
     }
 
     private void timeout(GuardEntry entry) {
-        List<Runnable> afterTransition = new ArrayList<>();
+        AfterTransition afterTransition = new AfterTransition();
         synchronized (this) {
             if (!guardAwaitsTimedBoundary(entry.state)) {
                 return;
@@ -880,7 +910,7 @@ final class SemanticControlCoordinator
     }
 
     private void forwarded(PermitContext context) {
-        List<Runnable> afterTransition = new ArrayList<>();
+        AfterTransition afterTransition = new AfterTransition();
         synchronized (this) {
             if (!context.claimOutcome()) {
                 return;
@@ -952,7 +982,7 @@ final class SemanticControlCoordinator
         SemanticPredecessorGuardFailure guardFailure,
         SemanticHoldFailure holdFailure
     ) {
-        List<Runnable> afterTransition = new ArrayList<>();
+        AfterTransition afterTransition = new AfterTransition();
         synchronized (this) {
             if (!context.claimOutcome()) {
                 return;
@@ -977,7 +1007,7 @@ final class SemanticControlCoordinator
     }
 
     void completeExecution() {
-        List<Runnable> afterTransition = new ArrayList<>();
+        AfterTransition afterTransition = new AfterTransition();
         synchronized (this) {
             if (!acceptingNewControls) {
                 return;
@@ -1009,13 +1039,17 @@ final class SemanticControlCoordinator
             }
         }
         runAfterTransition(afterTransition);
-        timeoutScheduler.close();
+        try {
+            timeoutScheduler.close();
+        } finally {
+            closeCompletionDispatcherSafely();
+        }
     }
 
     private void abortGuardUsesLocked(
         List<GuardUse> uses,
         SemanticPredecessorGuardFailure failure,
-        List<Runnable> afterTransition
+        AfterTransition afterTransition
     ) {
         for (GuardUse use : uses) {
             GuardEntry entry = use.entry;
@@ -1029,7 +1063,7 @@ final class SemanticControlCoordinator
     private void failHoldLocked(
         HoldEntry entry,
         SemanticHoldFailure failure,
-        List<Runnable> afterTransition
+        AfterTransition afterTransition
     ) {
         terminalHoldLocked(
             entry,
@@ -1043,7 +1077,7 @@ final class SemanticControlCoordinator
         HoldEntry entry,
         SemanticHoldState terminalState,
         Optional<SemanticHoldFailure> failure,
-        List<Runnable> afterTransition
+        AfterTransition afterTransition
     ) {
         transitionHoldLocked(entry, terminalState, failure);
         cancelTimeout(entry);
@@ -1061,22 +1095,24 @@ final class SemanticControlCoordinator
                 SemanticPredecessorGuardFailure.SESSION_ABANDONED,
                 afterTransition
             );
-            afterTransition.add(
+            afterTransition.addInternal(
                 () -> entry.permit.authorize(ForwardingDecision.CLOSE_SESSION)
             );
         }
         IllegalStateException terminalFailure = terminalFailure("hold", entry.state);
         if (!entry.reachedEstablished && !entry.reached.isDone()) {
-            afterTransition.add(() -> entry.reached.completeExceptionally(terminalFailure));
+            afterTransition.addPublic(
+                () -> entry.reached.completeExceptionally(terminalFailure)
+            );
         }
         if (terminalState == SemanticHoldState.FORWARDED) {
-            afterTransition.add(() -> entry.releaseCompletion.complete(null));
+            afterTransition.addPublic(() -> entry.releaseCompletion.complete(null));
         } else if (!entry.releaseCompletion.isDone()) {
-            afterTransition.add(
+            afterTransition.addPublic(
                 () -> entry.releaseCompletion.completeExceptionally(terminalFailure)
             );
         }
-        afterTransition.add(() -> entry.completion.complete(terminalState));
+        afterTransition.addPublic(() -> entry.completion.complete(terminalState));
     }
 
     private void transitionHoldLocked(
@@ -1091,7 +1127,7 @@ final class SemanticControlCoordinator
     private void failGuardLocked(
         GuardEntry entry,
         SemanticPredecessorGuardFailure failure,
-        List<Runnable> afterTransition
+        AfterTransition afterTransition
     ) {
         if (!guardIsActiveForFailureOrTeardown(entry.state)) {
             return;
@@ -1108,7 +1144,7 @@ final class SemanticControlCoordinator
         GuardEntry entry,
         SemanticPredecessorGuardState terminalState,
         Optional<SemanticPredecessorGuardFailure> failure,
-        List<Runnable> afterTransition
+        AfterTransition afterTransition
     ) {
         transitionGuardLocked(entry, terminalState, failure);
         cancelTimeout(entry);
@@ -1118,7 +1154,7 @@ final class SemanticControlCoordinator
             guards.remove(entry.ref);
         }
         if (!entry.completion.isDone()) {
-            afterTransition.add(() -> entry.completion.complete(terminalState));
+            afterTransition.addPublic(() -> entry.completion.complete(terminalState));
         }
     }
 
@@ -1254,6 +1290,15 @@ final class SemanticControlCoordinator
         }
     }
 
+    private void requireControlCapacity() {
+        if (allHolds.size() + allGuards.size() >= MAXIMUM_CONTROLS) {
+            throw new IllegalStateException(
+                "An environment execution supports at most " + MAXIMUM_CONTROLS
+                    + " semantic controls"
+            );
+        }
+    }
+
     private void requireRequiredObservationAvailable(ConnectionId connectionId) {
         if (failedRequiredObservationConnections.contains(connectionId)) {
             throw new IllegalStateException(
@@ -1287,7 +1332,7 @@ final class SemanticControlCoordinator
 
     private void scheduleGuardTimeout(
         GuardEntry entry,
-        List<Runnable> afterTransition
+        AfterTransition afterTransition
     ) {
         try {
             TimeoutTask scheduled = timeoutScheduler.schedule(
@@ -1440,30 +1485,27 @@ final class SemanticControlCoordinator
         );
     }
 
-    private void runAfterTransition(List<Runnable> actions) {
-        proofObservations.finalizePending();
-        for (Runnable action : actions) {
-            action.run();
+    private void runAfterTransition(AfterTransition actions) {
+        actions.runInternal();
+        CompletionGate publicationGate = new CompletionGate();
+        dispatchPublic(actions, publicationGate);
+        try {
+            proofObservations.finalizePending();
+        } finally {
+            publicationGate.open();
         }
     }
 
     record PreparedControlCancellation(
-        List<Runnable> notifications,
+        AfterTransition actions,
         List<Throwable> failures
     ) {
         PreparedControlCancellation {
-            notifications = List.copyOf(Objects.requireNonNull(
-                notifications,
-                "notifications must not be null"
-            ));
+            actions = Objects.requireNonNull(actions, "actions must not be null");
             failures = List.copyOf(Objects.requireNonNull(
                 failures,
                 "failures must not be null"
             ));
-        }
-
-        void deliver() {
-            notifications.forEach(Runnable::run);
         }
 
         private void rethrowFirstFailure() {
@@ -1475,6 +1517,144 @@ final class SemanticControlCoordinator
                 throw runtime;
             }
             throw (Error) failure;
+        }
+    }
+
+    CompletionGate newCompletionGate() {
+        return new CompletionGate();
+    }
+
+    void runPreparedInternalActions(PreparedControlCancellation cancellation) {
+        Objects.requireNonNull(cancellation, "cancellation must not be null")
+            .actions()
+            .runInternal();
+    }
+
+    void submitPreparedPublicCompletions(
+        PreparedControlCancellation cancellation,
+        CompletionGate publicationGate
+    ) {
+        cancellation = Objects.requireNonNull(cancellation, "cancellation must not be null");
+        dispatchPublic(cancellation.actions(), publicationGate);
+    }
+
+    private void dispatchPublic(AfterTransition actions, CompletionGate publicationGate) {
+        for (Runnable completion : actions.publicCompletions()) {
+            try {
+                completionDispatcher.dispatch(completion, publicationGate);
+            } catch (RuntimeException | Error ignored) {
+                // Completion delivery infrastructure must never replace framework state.
+            }
+        }
+    }
+
+    private void closeCompletionDispatcherSafely() {
+        try {
+            completionDispatcher.close();
+        } catch (RuntimeException | Error ignored) {
+            // Completion delivery infrastructure must never fail environment cleanup.
+        }
+    }
+
+    static final class CompletionGate {
+        private final CountDownLatch published = new CountDownLatch(1);
+
+        void open() {
+            published.countDown();
+        }
+
+        void awaitPublication() {
+            boolean interrupted = false;
+            while (true) {
+                try {
+                    published.await();
+                    break;
+                } catch (InterruptedException ignored) {
+                    interrupted = true;
+                }
+            }
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    interface CompletionDispatcher extends AutoCloseable {
+        void dispatch(Runnable completion, CompletionGate publicationGate);
+
+        @Override
+        void close();
+    }
+
+    private static final class SystemCompletionDispatcher implements CompletionDispatcher {
+        private final Object owner = new Object();
+        private final java.util.concurrent.ThreadFactory threadFactory = Thread.ofVirtual()
+            .name("system-proof-public-completion-", 0L)
+            .factory();
+        private int accepted;
+
+        @Override
+        public void dispatch(Runnable completion, CompletionGate publicationGate) {
+            completion = Objects.requireNonNull(completion, "completion must not be null");
+            publicationGate = Objects.requireNonNull(
+                publicationGate,
+                "publicationGate must not be null"
+            );
+            Thread thread;
+            synchronized (owner) {
+                if (accepted >= MAXIMUM_PUBLIC_COMPLETIONS) {
+                    throw new IllegalStateException(
+                        "Completion dispatcher capacity is exhausted"
+                    );
+                }
+                Runnable acceptedCompletion = completion;
+                CompletionGate acceptedGate = publicationGate;
+                thread = threadFactory.newThread(() -> {
+                    acceptedGate.awaitPublication();
+                    try {
+                        acceptedCompletion.run();
+                    } catch (RuntimeException | Error ignored) {
+                        // Public dependents cannot affect framework execution.
+                    }
+                });
+                accepted++;
+                try {
+                    thread.start();
+                } catch (RuntimeException | Error failure) {
+                    accepted--;
+                    throw failure;
+                }
+            }
+        }
+
+        @Override
+        public void close() {
+            // No persistent worker or queue exists. In-flight permit outcomes may still
+            // publish their already bounded roots after environment teardown.
+        }
+    }
+
+    private static final class AfterTransition {
+        private final List<Runnable> internalActions = new ArrayList<>();
+        private final List<Runnable> publicCompletions = new ArrayList<>();
+
+        private void addInternal(Runnable action) {
+            internalActions.add(Objects.requireNonNull(action, "action must not be null"));
+        }
+
+        private void addPublic(Runnable completion) {
+            publicCompletions.add(Objects.requireNonNull(
+                completion,
+                "completion must not be null"
+            ));
+        }
+
+        private void runInternal() {
+            internalActions.forEach(Runnable::run);
+        }
+
+        private List<Runnable> publicCompletions() {
+            return List.copyOf(publicCompletions);
         }
     }
 
