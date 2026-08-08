@@ -187,8 +187,10 @@ final class RuntimeConnectionRegistry {
         catalog.all().forEach(this::recordLifecycle);
     }
 
-    ProofEvidenceWindowTracker.EvidenceWindow openProofEvidenceWindow() {
-        return evidenceWindows.openWindow();
+    ProofEvidenceWindowTracker.EvidenceWindow openProofEvidenceWindow(
+        java.util.function.Consumer<ProofEvidenceWindowTracker.EvidenceWindow> admission
+    ) {
+        return evidenceWindows.openWindow(admission);
     }
 
     boolean isWithinProofEvidenceWindow(

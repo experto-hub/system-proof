@@ -3,6 +3,7 @@ package io.github.jacekkardys.systemproof.environment;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Consumer;
 import io.github.jacekkardys.systemproof.observation.FlowDirection;
 import io.github.jacekkardys.systemproof.observation.InteractionRef;
 import io.github.jacekkardys.systemproof.observation.SessionId;
@@ -17,32 +18,48 @@ import io.github.jacekkardys.systemproof.observation.SessionId;
 final class ProofEvidenceWindowTracker {
     private final Map<StreamId, Long> lastRecordedOrdinals = new HashMap<>();
     private final Runnable beforeWindowOpen;
+    private final Runnable beforeInteractionRecord;
     private boolean windowOpened;
 
     ProofEvidenceWindowTracker() {
-        this(() -> {});
+        this(() -> {}, () -> {});
     }
 
     ProofEvidenceWindowTracker(Runnable beforeWindowOpen) {
+        this(beforeWindowOpen, () -> {});
+    }
+
+    ProofEvidenceWindowTracker(
+        Runnable beforeWindowOpen,
+        Runnable beforeInteractionRecord
+    ) {
         this.beforeWindowOpen = Objects.requireNonNull(
             beforeWindowOpen,
             "beforeWindowOpen must not be null"
         );
+        this.beforeInteractionRecord = Objects.requireNonNull(
+            beforeInteractionRecord,
+            "beforeInteractionRecord must not be null"
+        );
     }
 
-    synchronized void recorded(InteractionRef interaction) {
+    void recorded(InteractionRef interaction) {
         interaction = Objects.requireNonNull(interaction, "interaction must not be null");
-        StreamId stream = StreamId.from(interaction);
-        Long previous = lastRecordedOrdinals.get(stream);
-        if (previous != null && interaction.ordinal() <= previous) {
-            throw new IllegalStateException(
-                "Interaction ordinals must increase within one observed stream"
-            );
+        beforeInteractionRecord.run();
+        synchronized (this) {
+            StreamId stream = StreamId.from(interaction);
+            Long previous = lastRecordedOrdinals.get(stream);
+            if (previous != null && interaction.ordinal() <= previous) {
+                throw new IllegalStateException(
+                    "Interaction ordinals must increase within one observed stream"
+                );
+            }
+            lastRecordedOrdinals.put(stream, interaction.ordinal());
         }
-        lastRecordedOrdinals.put(stream, interaction.ordinal());
     }
 
-    EvidenceWindow openWindow() {
+    EvidenceWindow openWindow(Consumer<EvidenceWindow> admitWindow) {
+        admitWindow = Objects.requireNonNull(admitWindow, "admitWindow must not be null");
         beforeWindowOpen.run();
         synchronized (this) {
             if (windowOpened) {
@@ -51,7 +68,9 @@ final class ProofEvidenceWindowTracker {
                 );
             }
             windowOpened = true;
-            return new EvidenceWindow(this, Map.copyOf(lastRecordedOrdinals));
+            EvidenceWindow window = new EvidenceWindow(this, lastRecordedOrdinals);
+            admitWindow.accept(window);
+            return window;
         }
     }
 

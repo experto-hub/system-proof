@@ -75,11 +75,15 @@ framework monitors and installed only if the execution is still active.
 The observation owner assigns every `InteractionRef` and records its session/direction ordinal
 before journal publication and any proof or control callback. At the control-owned activation
 boundary, while the control monitor is still held, the runtime captures the current ordinal
-watermark for every observed stream and installs the resulting membership predicate into the
-proof execution and all prepared controls. Only identities after that watermark, or from streams
-created later, belong to the evidence window. Callback arrival time is irrelevant: an interaction
-observed before the boundary cannot satisfy correlation, evidence, a hold, a guard, or a relation
-even if its callback is delayed until after `ACTIVE`.
+watermark for every observed stream. The observation tracker retains its recording boundary until
+the proof execution has installed that immutable window and entered `ACTIVE`; recording uses the
+same tracker-to-proof lock order. It then installs the resulting membership predicate into all
+prepared controls before exposing the completed activation transaction. Only identities after
+that watermark, or from streams created later, belong to the evidence window. A post-watermark
+recording cannot publish its proof callback before `ACTIVE`, while an interaction observed before
+the boundary cannot satisfy correlation, evidence, a hold, a guard, or a relation even if its
+callback is delayed until after `ACTIVE`. Callback time remains irrelevant and external callbacks
+remain outside framework monitors.
 
 ## Read model and evaluation
 
@@ -149,8 +153,12 @@ cancels the deadline and performs prepared-control state transitions without del
 completion callbacks, catches every cleanup failure, deterministically orders and caps retained
 type-only secondary diagnostics at 32, and freezes exactly one result. Only after result publication
 does it deliver the queued control completions. Cleanup cannot escape or replace the primary
-outcome. Reentrant completion callbacks may call `result()` or `evaluate()` and receive the same
-already frozen object without deadlock. Facts after the freeze cannot mutate the public result.
+outcome. Delivery is one ordered batch on an environment-owned daemon dispatcher with one worker
+and a queue bounded to one batch. Teardown interrupts it without waiting for arbitrary user code.
+A blocking or failing completion dependent therefore cannot hold the finalization owner, deadline
+worker, stimulus, result accessor, or environment close. Reentrant completion callbacks may call
+`result()` or `evaluate()` and receive the same already frozen object. Facts and callback failures
+after the freeze cannot mutate the public result.
 
 ## Result and report
 
@@ -162,8 +170,13 @@ Every obligation resolution carries a detached typed descriptor of the exact pre
 observation profile, correlation namespace, control reference and expected state, evidence kind,
 or causal-relation reference evaluated. Construction validates the complete descriptor-kind-
 resolution-reason-connection-interaction matrix. Only a guard control or causal relation may be
-`VIOLATED`, and both require exact successor provenance. `NOT_EVALUATED` has one exact terminal
-reason and no interaction provenance. Satisfied items remain satisfied after an independent
+`VIOLATED`, and both require the exact successor, optionally after the predecessor. A satisfied
+guard or established relation requires predecessor followed by successor. A non-violated partial
+terminal control may retain no interaction, its exact predecessor only, or—for a terminal event
+after successor authorization—the exact predecessor/successor pair. A timeout cannot retain the
+pair because authorization cancels its timer. Successor-only timeout, cancellation, ambiguity,
+missing-session, or failure provenance is rejected. `NOT_EVALUATED` has one exact terminal reason
+and no interaction provenance. Satisfied items remain satisfied after an independent
 decisive item regardless of declaration order. Its
 deterministic compact `ProofReport` is limited to 64 KiB characters. The outcome and decisive
 reason are rendered before truncatable obligation detail, so they survive worst-case truncation.

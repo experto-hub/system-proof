@@ -11,13 +11,15 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.function.Predicate;
 import io.github.jacekkardys.systemproof.control.SemanticHoldFailure;
 import io.github.jacekkardys.systemproof.control.SemanticHoldRef;
@@ -75,6 +77,7 @@ final class ProofExecutionCoordinator
     private final DeadlineScheduler deadlineScheduler;
     private final ProofOutcomeEvaluator outcomeEvaluator;
     private final BoundaryObserver boundaryObserver;
+    private final CompletionDispatcher completionDispatcher;
     private ProofSubjectRegistry proofSubjects;
     private SemanticControlCoordinator controls;
     private RuntimeConnectionRegistry connections;
@@ -116,6 +119,7 @@ final class ProofExecutionCoordinator
             boundaryObserver,
             "boundaryObserver must not be null"
         );
+        completionDispatcher = new CompletionDispatcher();
     }
 
     synchronized void bind(
@@ -371,14 +375,16 @@ final class ProofExecutionCoordinator
 
     private Predicate<InteractionRef> activateAtControlBoundary(ExecutionRecord record) {
         ProofEvidenceWindowTracker.EvidenceWindow evidenceWindow =
-            connections.openProofEvidenceWindow();
-        synchronized (this) {
-            if (record.state == ProofExecutionState.ACTIVATING) {
-                record.evidenceWindow = evidenceWindow;
-                record.state = ProofExecutionState.ACTIVE;
-                record.activationReached = true;
-            }
-        }
+            connections.openProofEvidenceWindow(window -> {
+                boundaryObserver.evidenceWindowCaptured();
+                synchronized (this) {
+                    if (record.state == ProofExecutionState.ACTIVATING) {
+                        record.evidenceWindow = window;
+                        record.state = ProofExecutionState.ACTIVE;
+                        record.activationReached = true;
+                    }
+                }
+            });
         return interaction -> connections.isWithinProofEvidenceWindow(
             evidenceWindow,
             interaction
@@ -632,6 +638,8 @@ final class ProofExecutionCoordinator
                     diagnostic(ProofFailureStage.CLEANUP, failure)
                 );
             }
+        } finally {
+            completionDispatcher.close();
         }
         return unfinished;
     }
@@ -1822,7 +1830,9 @@ final class ProofExecutionCoordinator
         }
         record.resultReady.complete(frozen);
         if (controlNotifications != null) {
-            controlNotifications.deliver();
+            SemanticControlCoordinator.PreparedControlCancellation notifications =
+                controlNotifications;
+            completionDispatcher.dispatch(notifications::deliver);
         }
     }
 
@@ -2069,6 +2079,8 @@ final class ProofExecutionCoordinator
         default void deadlineBoundaryReached() {}
 
         default void evaluationBoundaryReached() {}
+
+        default void evidenceWindowCaptured() {}
     }
 
     @FunctionalInterface
@@ -2093,6 +2105,37 @@ final class ProofExecutionCoordinator
                 TimeUnit.NANOSECONDS
             );
             return () -> future.cancel(false);
+        }
+
+        @Override
+        public void close() {
+            executor.shutdownNow();
+        }
+    }
+
+    private static final class CompletionDispatcher implements AutoCloseable {
+        private final ThreadPoolExecutor executor = new ThreadPoolExecutor(
+            1,
+            1,
+            0L,
+            TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(1),
+            runnable -> {
+                Thread thread = new Thread(
+                    runnable,
+                    "system-proof-completion-delivery"
+                );
+                thread.setDaemon(true);
+                return thread;
+            },
+            new ThreadPoolExecutor.AbortPolicy()
+        );
+
+        private void dispatch(Runnable notifications) {
+            executor.execute(Objects.requireNonNull(
+                notifications,
+                "notifications must not be null"
+            ));
         }
 
         @Override

@@ -191,11 +191,6 @@ public record ProofObligationResolution(
             return;
         }
         require(connectionId.isEmpty(), "A non-violated cross-connection guard has no single connection");
-        validateGuardInteractions(
-            descriptor.predecessorConnectionId(),
-            descriptor.successorConnectionId(),
-            interactions
-        );
         require(
             matches(resolution, reason,
                 ProofResolution.SATISFIED,
@@ -209,8 +204,19 @@ public record ProofObligationResolution(
             "Guard-control resolution and reason must agree"
         );
         if (resolution == ProofResolution.SATISFIED) {
-            require(interactions.size() == 2,
-                "A satisfied guard requires exact predecessor and successor provenance");
+            requireEstablishedProvenance(
+                descriptor.predecessorConnectionId(),
+                descriptor.successorConnectionId(),
+                interactions
+            );
+        } else if (resolution == ProofResolution.TIMED_OUT) {
+            requirePartialProvenance(descriptor.predecessorConnectionId(), interactions);
+        } else {
+            requireNonViolatedTerminalProvenance(
+                descriptor.predecessorConnectionId(),
+                descriptor.successorConnectionId(),
+                interactions
+            );
         }
     }
 
@@ -235,20 +241,22 @@ public record ProofObligationResolution(
             return;
         }
         require(connectionId.isEmpty(), "A causal relation has no single connection");
-        validateGuardInteractions(
-            descriptor.predecessorConnectionId(),
-            descriptor.successorConnectionId(),
-            interactions
-        );
         require(
             resolution == ProofResolution.SATISFIED
                 && reason == ProofResolutionReason.CAUSAL_RELATION_ESTABLISHED
-                && interactions.size() == 2
             || resolution == ProofResolution.UNREACHED
-                && reason == ProofResolutionReason.CAUSAL_RELATION_UNREACHED
-                && interactions.isEmpty(),
+                && reason == ProofResolutionReason.CAUSAL_RELATION_UNREACHED,
             "Causal-relation resolution, reason, and provenance must agree"
         );
+        if (resolution == ProofResolution.SATISFIED) {
+            requireEstablishedProvenance(
+                descriptor.predecessorConnectionId(),
+                descriptor.successorConnectionId(),
+                interactions
+            );
+        } else {
+            requirePartialProvenance(descriptor.predecessorConnectionId(), interactions);
+        }
     }
 
     private static void requireViolationProvenance(
@@ -261,24 +269,57 @@ public record ProofObligationResolution(
             "A violated relation requires exact successor connection provenance");
         require(!interactions.isEmpty() && interactions.size() <= 2,
             "A violated relation requires its exact successor interaction");
-        validateGuardInteractions(predecessor, successor, interactions);
+        validateViolationProvenance(predecessor, successor, interactions);
         require(interactions.getLast().connectionId().equals(successor),
             "The decisive violated interaction must belong to the successor connection");
     }
 
-    private static void validateGuardInteractions(
+    private static void requireEstablishedProvenance(
         ConnectionId predecessor,
         ConnectionId successor,
         List<InteractionRef> interactions
     ) {
-        if (interactions.size() == 1) {
-            require(interactions.getFirst().connectionId().equals(successor),
-                "A single guard interaction must be the successor");
-        } else if (interactions.size() == 2) {
-            require(interactions.getFirst().connectionId().equals(predecessor)
+        require(interactions.size() == 2
+                && interactions.getFirst().connectionId().equals(predecessor)
+                && interactions.getLast().connectionId().equals(successor),
+            "An established guard relation requires predecessor then successor provenance");
+    }
+
+    private static void requirePartialProvenance(
+        ConnectionId predecessor,
+        List<InteractionRef> interactions
+    ) {
+        require(interactions.isEmpty()
+                || interactions.size() == 1
+                    && interactions.getFirst().connectionId().equals(predecessor),
+            "A partial guard resolution may retain only its predecessor interaction");
+    }
+
+    private static void requireNonViolatedTerminalProvenance(
+        ConnectionId predecessor,
+        ConnectionId successor,
+        List<InteractionRef> interactions
+    ) {
+        require(interactions.isEmpty()
+                || interactions.size() == 1
+                    && interactions.getFirst().connectionId().equals(predecessor)
+                || interactions.size() == 2
+                    && interactions.getFirst().connectionId().equals(predecessor)
                     && interactions.getLast().connectionId().equals(successor),
-                "Guard interactions must retain predecessor then successor provenance");
-        }
+            "A non-violated terminal guard may retain predecessor progress and its successor");
+    }
+
+    private static void validateViolationProvenance(
+        ConnectionId predecessor,
+        ConnectionId successor,
+        List<InteractionRef> interactions
+    ) {
+        require(interactions.size() == 1
+                && interactions.getFirst().connectionId().equals(successor)
+                || interactions.size() == 2
+                    && interactions.getFirst().connectionId().equals(predecessor)
+                    && interactions.getLast().connectionId().equals(successor),
+            "A violated guard requires its successor, optionally after its predecessor");
     }
 
     private static void validateOptionalConnection(

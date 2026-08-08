@@ -133,7 +133,10 @@ final class ProofRuntimeHarness implements AutoCloseable {
             proofSubjects,
             capabilities,
             observedProofState,
-            new ProofEvidenceWindowTracker(hooks::beforeEvidenceWindow)
+            new ProofEvidenceWindowTracker(
+                hooks::beforeEvidenceWindow,
+                hooks::beforeInteractionWatermarkRecord
+            )
         );
         proofs.bind(proofSubjects, controls, connections);
         ComponentExecutionPlan plan = ComponentExecutionPlan.create(
@@ -204,6 +207,15 @@ final class ProofRuntimeHarness implements AutoCloseable {
         );
     }
 
+    static ProofRuntimeHarness startWithManualControlTimeout(
+        ManualControlTimeoutScheduler scheduler
+    ) {
+        return new ProofRuntimeHarness(
+            ProofOutcomeEvaluator.failClosed(),
+            scheduler
+        );
+    }
+
     static ProofRuntimeHarness startWithFailingControlCancellation() {
         return new ProofRuntimeHarness(
             ProofOutcomeEvaluator.failClosed(),
@@ -236,6 +248,17 @@ final class ProofRuntimeHarness implements AutoCloseable {
             subject,
             io.github.jacekkardys.systemproof.control.SemanticPredecessorRequirement
                 .confirmed(predecessor),
+            selector("successor"),
+            Duration.ofSeconds(30)
+        ));
+    }
+
+    SemanticPredecessorGuard declareForwardedGuard() {
+        SemanticInteractionSelector<String> predecessor = selector("predecessor");
+        return controls.declareGuard(SemanticPredecessorGuardSpec.requiring(
+            subject,
+            io.github.jacekkardys.systemproof.control.SemanticPredecessorRequirement
+                .forwarded(predecessor),
             selector("successor"),
             Duration.ofSeconds(30)
         ));
@@ -312,6 +335,8 @@ final class ProofRuntimeHarness implements AutoCloseable {
         BoundaryHooks NONE = new BoundaryHooks() {};
 
         default void beforeEvidenceWindow() {}
+
+        default void beforeInteractionWatermarkRecord() {}
 
         default void beforeProofFact(
             io.github.jacekkardys.systemproof.journal.ScenarioEvent event
@@ -536,6 +561,34 @@ final class ProofRuntimeHarness implements AutoCloseable {
 
         @Override
         public void close() {}
+    }
+
+    static final class ManualControlTimeoutScheduler
+        implements SemanticControlCoordinator.TimeoutScheduler {
+        private final AtomicReference<Runnable> scheduled = new AtomicReference<>();
+
+        @Override
+        public SemanticControlCoordinator.TimeoutTask schedule(
+            Duration delay,
+            Runnable action
+        ) {
+            if (!scheduled.compareAndSet(null, action)) {
+                throw new IllegalStateException("Only one control timeout is expected");
+            }
+            return () -> scheduled.compareAndSet(action, null);
+        }
+
+        void fire() {
+            java.util.Objects.requireNonNull(
+                scheduled.getAndSet(null),
+                "control timeout was not scheduled"
+            ).run();
+        }
+
+        @Override
+        public void close() {
+            scheduled.set(null);
+        }
     }
 
     private static final class ImmediateControlTimeoutScheduler

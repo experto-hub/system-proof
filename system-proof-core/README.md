@@ -76,8 +76,9 @@ coverage completes `INCONCLUSIVE`; malformed plans throw `ProofConfigurationExce
 activation failure completes `ERROR`. In every pre-stimulus outcome the stimulus callback is not
 invoked. The observation owner records each allocated `InteractionRef` before journal publication
 and proof callbacks. While the control activation transaction still owns its monitor, it captures
-one per-session/direction ordinal watermark. Only later observation identities belong to the proof
-window; callback arrival order cannot admit pre-boundary traffic.
+one per-session/direction ordinal watermark and retains the observation recording boundary until
+the proof is `ACTIVE`. Only later observation identities belong to the proof window; callback
+arrival order can neither admit pre-boundary traffic nor discard post-boundary traffic.
 
 The environment consumes only framework-owned typed facts into a bounded current-state index. It
 does not scan or duplicate the scenario journal and never infers correlation or causality from
@@ -93,7 +94,9 @@ boundary as explicit evaluation and always yields a typed `INCONCLUSIVE` evaluat
 earlier violation or error already won. Required observation refresh is single-flight and bounded
 by that deadline; teardown never waits for a blocked provider, and a late refresh is discarded.
 Finalization performs internal cleanup, freezes exactly one result, then delivers public control
-completion callbacks, so reentrant result/evaluation access cannot deadlock. At most 32 later
+completion callbacks as one ordered batch on a bounded daemon dispatcher. Blocking or failing
+dependents cannot hold proof finalization or teardown, and reentrant result/evaluation access sees
+the frozen object. At most 32 later
 type-only diagnostics may be retained, and repeated evaluation/result access returns the same
 immutable object. An unfinished active execution makes environment teardown fail. The deterministic
 compact report is capped at 64 KiB and never renders payloads, evidence bytes, native references,

@@ -47,6 +47,61 @@ class ProofExecutionLinearizationBoundaryTest {
     }
 
     @RepeatedTest(20)
+    void shouldAdmitAnInteractionThatStartsRecordingAfterTheWatermarkIsCaptured()
+        throws Exception {
+        CountDownLatch windowCaptured = new CountDownLatch(1);
+        CountDownLatch activationRelease = new CountDownLatch(1);
+        CountDownLatch interactionRecordAttempted = new CountDownLatch(1);
+        AtomicBoolean observeRecordAttempt = new AtomicBoolean(false);
+        ProofRuntimeHarness.BoundaryHooks hooks = new ProofRuntimeHarness.BoundaryHooks() {
+            @Override
+            public void evidenceWindowCaptured() {
+                windowCaptured.countDown();
+                await(activationRelease);
+            }
+
+            @Override
+            public void beforeInteractionWatermarkRecord() {
+                if (observeRecordAttempt.get()) {
+                    interactionRecordAttempted.countDown();
+                }
+            }
+        };
+        try (ProofRuntimeHarness harness = ProofRuntimeHarness.startWithBoundaryHooks(hooks);
+             ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            SemanticPredecessorGuard guard = harness.declareGuard();
+            CorrelationKey key = preWindowKey();
+            harness.proofSubjects.arm(harness.subject, key);
+            Future<ProofExecution> activating = executor.submit(() ->
+                harness.activate(correlationAndGuardPlan(harness, guard, key))
+            );
+            await(windowCaptured);
+
+            observeRecordAttempt.set(true);
+            Future<?> observation = executor.submit(() -> {
+                ProofRuntimeHarness.Recorded recorded = harness.record("post-watermark");
+                harness.correlate(recorded, key, "post-watermark");
+            });
+            await(interactionRecordAttempted);
+            assertThat(observation).isNotDone();
+
+            activationRelease.countDown();
+            ProofExecution execution = get(activating);
+            get(observation);
+            execution.runStimulus(() -> {
+                harness.publish("predecessor");
+                harness.publish("successor");
+            });
+
+            ProofResult result = execution.evaluate();
+            assertThat(result.outcome()).isEqualTo(ProofOutcome.PROVED);
+            assertThat(result.resolutions()).allMatch(
+                value -> value.resolution() == ProofResolution.SATISFIED
+            );
+        }
+    }
+
+    @RepeatedTest(20)
     void shouldLetRequiredObservationFailureLinearizeBeforeDeadline() throws Exception {
         CountDownLatch markerEntered = new CountDownLatch(1);
         CountDownLatch markerRelease = new CountDownLatch(1);
