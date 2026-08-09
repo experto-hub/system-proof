@@ -365,6 +365,21 @@ final class ProofRuntimeHarness implements AutoCloseable {
         return controls.declareHold(selector(predicate), Duration.ofSeconds(30));
     }
 
+    SemanticHold declareNativeFlowHold(
+        CorrelationKey flowKey,
+        Predicate<String> predicate,
+        String nativeReference
+    ) {
+        return controls.declareHold(
+            selector(predicate).through(
+                flowKey,
+                ProofTestFixture.NativeCodec.INSTANCE,
+                ignored -> nativeReference
+            ),
+            Duration.ofSeconds(30)
+        );
+    }
+
     ProofExecution activate(ProofPlan plan) {
         return proofs.activate(plan, this::refreshObservation);
     }

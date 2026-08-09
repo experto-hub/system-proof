@@ -367,15 +367,17 @@ class ProofExecutionFollowUpTest {
     }
 
     @Test
-    void shouldFreezeTheSameReportForEarlyAndLateResultAccess() {
+    void shouldFreezeSecondaryFailuresAtTheImmutableResultBoundary() {
         String early;
         try (ProofRuntimeHarness harness = ProofRuntimeHarness.start()) {
             ProofExecution execution = prerequisite(harness, "stable-result-access");
             harness.frameworkFailure();
             ProofResult frozen = execution.result();
-            harness.proofs.journalFailure(new BetaSecondaryFailure());
             early = frozen.report().content();
+            harness.proofs.journalFailure(new BetaSecondaryFailure());
             assertThat(execution.result()).isSameAs(frozen);
+            assertThat(frozen.report().content()).isEqualTo(early);
+            assertThat(frozen.secondaryDiagnostics()).isEmpty();
         }
         try (ProofRuntimeHarness harness = ProofRuntimeHarness.start()) {
             ProofExecution execution = prerequisite(harness, "stable-result-access");
@@ -383,8 +385,10 @@ class ProofExecutionFollowUpTest {
             harness.proofs.journalFailure(new BetaSecondaryFailure());
             ProofResult late = execution.result();
 
-            assertThat(late.report().content()).isEqualTo(early);
-            assertThat(late.secondaryDiagnostics()).isEmpty();
+            assertThat(late.report().content()).isNotEqualTo(early);
+            assertThat(late.secondaryDiagnostics()).singleElement().satisfies(value ->
+                assertThat(value.failure().failureType()).isEqualTo("BetaSecondaryFailure")
+            );
         }
     }
 

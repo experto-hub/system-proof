@@ -64,6 +64,12 @@ import io.github.jacekkardys.systemproof.topology.ConnectionId;
 /**
  * One environment-owned proof activation, typed current-state index, evaluator, and terminal
  * outcome linearization point.
+ *
+ * <p>The global nested order is semantic controls, the authoritative-operation boundary, proof
+ * subjects, journal publication, then this proof-evaluation monitor. A participant may enter at a
+ * later level, but never acquires an earlier one. The authoritative action and correlation
+ * mutation run outside this monitor; only their detached complete fact batch enters proof state.
+ * Completion delivery runs after every framework monitor and immutable-result gate is released.
  */
 final class ProofExecutionCoordinator
     implements ProofFactObserver, ProofObservationListener {
@@ -77,6 +83,7 @@ final class ProofExecutionCoordinator
     private final DeadlineScheduler deadlineScheduler;
     private final ProofOutcomeEvaluator outcomeEvaluator;
     private final BoundaryObserver boundaryObserver;
+    private final Object authoritativeOperationBoundary = new Object();
     private final ThreadLocal<List<ScenarioEvent>> activeFactBatch = new ThreadLocal<>();
     private ProofSubjectRegistry proofSubjects;
     private SemanticControlCoordinator controls;
@@ -179,6 +186,7 @@ final class ProofExecutionCoordinator
         try {
             controlMetadata = captureControlMetadata(plan);
         } catch (RuntimeException | Error failure) {
+            rethrowFatal(failure);
             synchronized (this) {
                 activationReserved = false;
             }
@@ -210,6 +218,7 @@ final class ProofExecutionCoordinator
                     + "' is incompatible with this environment execution"
             );
         } catch (RuntimeException | Error failure) {
+            rethrowFatal(failure);
             complete(
                 record,
                 ProofOutcome.ERROR,
@@ -227,6 +236,7 @@ final class ProofExecutionCoordinator
         try {
             seedPrerequisites(record);
         } catch (RuntimeException | Error failure) {
+            rethrowFatal(failure);
             completeAndCancelPrepared(
                 record,
                 activationControls,
@@ -267,6 +277,7 @@ final class ProofExecutionCoordinator
                 refreshObservation.refresh(record.requiredObservationConnections)
             );
         } catch (RuntimeException | Error failure) {
+            rethrowFatal(failure);
             completeAndCancelPrepared(
                 record,
                 activationControls,
@@ -286,6 +297,7 @@ final class ProofExecutionCoordinator
         try {
             unavailableObservation = seedObservations(record);
         } catch (RuntimeException | Error failure) {
+            rethrowFatal(failure);
             completeAndCancelPrepared(
                 record,
                 activationControls,
@@ -326,6 +338,7 @@ final class ProofExecutionCoordinator
                 () -> activateAtControlBoundary(record)
             );
         } catch (RuntimeException | Error failure) {
+            rethrowFatal(failure);
             complete(
                 record,
                 ProofOutcome.ERROR,
@@ -357,6 +370,7 @@ final class ProofExecutionCoordinator
             }
             finalizePending(record);
         } catch (RuntimeException | Error failure) {
+            rethrowFatal(failure);
             synchronized (this) {
                 record.deadlineInstalling = false;
             }
@@ -398,39 +412,51 @@ final class ProofExecutionCoordinator
             batch.add(event);
             return;
         }
-        applyFacts(List.of(event), false);
+        synchronized (authoritativeOperationBoundary) {
+            applyFacts(List.of(event), false);
+        }
     }
 
     @Override
-    public synchronized <T> T factBatch(Supplier<T> action) {
+    public <T> T factBatch(Supplier<T> action) {
         action = Objects.requireNonNull(action, "action must not be null");
         if (activeFactBatch.get() != null) {
             return action.get();
         }
-        ExecutionRecord record = execution;
-        boolean batchOpened = record != null
-            && record.outcome == null
-            && record.state != ProofExecutionState.COMPLETED
-            && !record.factBatchActive;
-        if (batchOpened) {
-            record.factBatchActive = true;
-        }
-        List<ScenarioEvent> batch = new ArrayList<>();
-        activeFactBatch.set(batch);
+
+        boundaryObserver.beforeAuthoritativeOperationBoundary();
+        ExecutionRecord[] selected = new ExecutionRecord[1];
         try {
-            return action.get();
+            synchronized (authoritativeOperationBoundary) {
+                List<ScenarioEvent> batch = new ArrayList<>();
+                activeFactBatch.set(batch);
+                try {
+                    return action.get();
+                } finally {
+                    activeFactBatch.remove();
+                    selected[0] = applyFacts(batch, true);
+                }
+            }
         } finally {
-            activeFactBatch.remove();
-            applyFacts(batch, false);
-            if (batchOpened) {
-                completeFactBatchLocked(record);
+            if (selected[0] != null) {
+                try {
+                    boundaryObserver.authoritativeOutcomeSelectedBeforeFinalization();
+                } finally {
+                    synchronized (this) {
+                        selected[0].authoritativeOutcomeBoundaryPending = false;
+                    }
+                }
             }
         }
     }
 
-    private void applyFacts(List<ScenarioEvent> events, boolean authoritativeBatch) {
+    private ExecutionRecord applyFacts(
+        List<ScenarioEvent> events,
+        boolean authoritativeBatch
+    ) {
         synchronized (this) {
             ExecutionRecord record = execution;
+            ExecutionRecord selected = null;
             boolean batchOpened = authoritativeBatch
                 && record != null
                 && record.outcome == null
@@ -452,6 +478,7 @@ final class ProofExecutionCoordinator
                     try {
                         applyFactLocked(event);
                     } catch (RuntimeException | Error evaluatorFailure) {
+                        rethrowFatal(evaluatorFailure);
                         if (execution != null && execution.outcome == null) {
                             completeLocked(
                                 execution,
@@ -477,9 +504,13 @@ final class ProofExecutionCoordinator
                 }
             } finally {
                 if (batchOpened) {
-                    completeFactBatchLocked(record);
+                    if (completeFactBatchLocked(record)) {
+                        record.authoritativeOutcomeBoundaryPending = true;
+                        selected = record;
+                    }
                 }
             }
+            return selected;
         }
     }
 
@@ -529,6 +560,12 @@ final class ProofExecutionCoordinator
     @Override
     public void journalFailure(Throwable failure) {
         Objects.requireNonNull(failure, "failure must not be null");
+        synchronized (authoritativeOperationBoundary) {
+            journalFailureAtBoundary(failure);
+        }
+    }
+
+    private void journalFailureAtBoundary(Throwable failure) {
         synchronized (this) {
             if (execution == null) {
                 return;
@@ -554,6 +591,12 @@ final class ProofExecutionCoordinator
     @Override
     public void observationChanged(RuntimeConnectionSnapshot snapshot) {
         Objects.requireNonNull(snapshot, "snapshot must not be null");
+        synchronized (authoritativeOperationBoundary) {
+            observationChangedAtBoundary(snapshot);
+        }
+    }
+
+    private void observationChangedAtBoundary(RuntimeConnectionSnapshot snapshot) {
         synchronized (this) {
             if (execution == null) {
                 return;
@@ -624,6 +667,12 @@ final class ProofExecutionCoordinator
             connectionId,
             "connectionId must not be null"
         );
+        synchronized (authoritativeOperationBoundary) {
+            requiredObservationFailedAtBoundary(connectionId);
+        }
+    }
+
+    private void requiredObservationFailedAtBoundary(ConnectionId connectionId) {
         synchronized (this) {
             failedRequiredObservations.add(connectionId);
             if (execution == null) {
@@ -701,6 +750,7 @@ final class ProofExecutionCoordinator
         try {
             deadlineScheduler.close();
         } catch (RuntimeException | Error failure) {
+            rethrowFatal(failure);
             if (execution != null) {
                 addSecondarySafely(
                     execution,
@@ -1453,6 +1503,7 @@ final class ProofExecutionCoordinator
                 }
                 completeLocked(record, ProofOutcome.INCONCLUSIVE, null);
             } catch (RuntimeException | Error failure) {
+                rethrowFatal(failure);
                 record.evaluationState = ProofEvaluationState.FAILED;
                 record.primaryEvaluation = new ProofEvaluationResolution(
                     ProofEvaluationState.FAILED,
@@ -1496,6 +1547,7 @@ final class ProofExecutionCoordinator
                 }
             }
         } catch (RuntimeException | Error failure) {
+            rethrowFatal(failure);
             synchronized (this) {
                 if (record.outcome == null) {
                     record.stimulusLifecycle = StimulusLifecycle.FAILED;
@@ -1557,6 +1609,7 @@ final class ProofExecutionCoordinator
                     "Proof observation refresher must return a completion stage"
                 );
             } catch (RuntimeException | Error failure) {
+                rethrowFatal(failure);
                 observationRefreshCompleted(record, failure);
                 refresh = null;
             }
@@ -1631,6 +1684,7 @@ final class ProofExecutionCoordinator
                 );
                 completeLocked(record, outcome, evaluationFailure(outcome));
             } catch (RuntimeException | Error evaluatorFailure) {
+                rethrowFatal(evaluatorFailure);
                 record.evaluationState = ProofEvaluationState.FAILED;
                 record.primaryEvaluation = new ProofEvaluationResolution(
                     ProofEvaluationState.FAILED,
@@ -1783,13 +1837,15 @@ final class ProofExecutionCoordinator
         }
     }
 
-    private void completeFactBatchLocked(ExecutionRecord record) {
+    private boolean completeFactBatchLocked(ExecutionRecord record) {
         PendingCompletion pending = record.pendingCompletion;
         record.pendingCompletion = null;
         record.factBatchActive = false;
         if (pending != null) {
             completeLocked(record, pending.outcome(), pending.failure());
+            return true;
         }
+        return false;
     }
 
     private static List<RequirementStateSnapshot> snapshotStates(ExecutionRecord record) {
@@ -1954,6 +2010,9 @@ final class ProofExecutionCoordinator
             if (record.deadlineInstalling) {
                 return;
             }
+            if (record.authoritativeOutcomeBoundaryPending) {
+                return;
+            }
             if (!record.finalizing) {
                 record.finalizing = true;
                 record.finalizationOwner = Thread.currentThread();
@@ -1991,6 +2050,7 @@ final class ProofExecutionCoordinator
                     );
                 }
             } catch (RuntimeException | Error failure) {
+                rethrowFatal(failure);
                 addSecondarySafely(
                     record,
                     diagnostic(ProofFailureStage.CLEANUP, failure)
@@ -2003,10 +2063,15 @@ final class ProofExecutionCoordinator
 
         ProofResult frozen;
         SemanticControlCoordinator.CompletionGate publicationGate = controls.newCompletionGate();
+        RuntimeException injectedConstructionFailure =
+            boundaryObserver.resultConstructionFailure();
         synchronized (this) {
             try {
+                if (injectedConstructionFailure != null) {
+                    throw injectedConstructionFailure;
+                }
                 frozen = freezeResultLocked(record);
-            } catch (RuntimeException | Error constructionFailure) {
+            } catch (RuntimeException constructionFailure) {
                 frozen = recoverResultConstructionFailureLocked(
                     record,
                     constructionFailure
@@ -2018,6 +2083,7 @@ final class ProofExecutionCoordinator
         try {
             boundaryObserver.resultCreatedBeforeCompletionSubmission();
         } catch (RuntimeException | Error ignored) {
+            rethrowFatal(ignored);
             // A package-private boundary observer cannot poison immutable result publication.
         }
         if (controlNotifications != null) {
@@ -2054,6 +2120,7 @@ final class ProofExecutionCoordinator
         ExecutionRecord record,
         Throwable constructionFailure
     ) {
+        record.resultConstructionRecoveryCount++;
         if (record.primaryFailure != null) {
             addSecondary(record, record.primaryFailure);
         }
@@ -2110,6 +2177,12 @@ final class ProofExecutionCoordinator
             current = current.getCause();
         }
         return current;
+    }
+
+    private static void rethrowFatal(Throwable failure) {
+        if (failure instanceof Error fatal && !(failure instanceof AssertionError)) {
+            throw fatal;
+        }
     }
 
     private RuntimeProofPrerequisite requirePrerequisite(ProofPrerequisite prerequisite) {
@@ -2264,8 +2337,7 @@ final class ProofExecutionCoordinator
         ExecutionRecord record,
         ProofDiagnostic diagnostic
     ) {
-        if (record.state == ProofExecutionState.COMPLETED
-            || (!record.finalizing && !record.factBatchActive)) {
+        if (record.state == ProofExecutionState.COMPLETED) {
             return;
         }
         record.secondaryDiagnostics.add(Objects.requireNonNull(
@@ -2292,6 +2364,7 @@ final class ProofExecutionCoordinator
         try {
             deadline.cancel();
         } catch (RuntimeException | Error failure) {
+            rethrowFatal(failure);
             addSecondarySafely(
                 record,
                 diagnostic(ProofFailureStage.CLEANUP, failure)
@@ -2304,6 +2377,63 @@ final class ProofExecutionCoordinator
             throw new IllegalArgumentException(
                 "Proof execution belongs to a different environment execution"
             );
+        }
+    }
+
+    static PublicationInvariant publicationInvariant(ProofExecution execution) {
+        Objects.requireNonNull(execution, "execution must not be null");
+        if (!(execution instanceof ExecutionHandle handle)) {
+            throw new IllegalArgumentException(
+                "Proof execution is not owned by this environment coordinator"
+            );
+        }
+        return handle.coordinator.publicationInvariant(handle.record);
+    }
+
+    private synchronized PublicationInvariant publicationInvariant(ExecutionRecord record) {
+        requireRecord(record);
+        int primaryResolutionCount = record.primaryResolutions == null
+            ? 0
+            : record.primaryResolutions.size();
+        boolean strictPrimaryResolutions = record.primaryResolutions != null
+            && record.primaryResolutions.stream().allMatch(
+                ProofExecutionCoordinator::isStrictResolutionSnapshot
+            );
+        ProofResult ready = record.resultReady.getNow(null);
+        return new PublicationInvariant(
+            record.outcome != null,
+            record.plan.requirements().size(),
+            primaryResolutionCount,
+            strictPrimaryResolutions,
+            record.resultReady.isDone()
+                && !record.resultReady.isCompletedExceptionally()
+                && !record.resultReady.isCancelled(),
+            ready != null && ready == record.result,
+            record.finalizationReady.isDone()
+                && !record.finalizationReady.isCompletedExceptionally()
+                && !record.finalizationReady.isCancelled(),
+            record.finalizationComplete,
+            record.finalizing,
+            record.finalizationOwner != null,
+            record.authoritativeOutcomeBoundaryPending,
+            record.resultConstructionRecoveryCount
+        );
+    }
+
+    private static boolean isStrictResolutionSnapshot(ProofObligationResolution resolution) {
+        try {
+            new ProofObligationResolution(
+                resolution.id(),
+                resolution.kind(),
+                resolution.descriptor(),
+                resolution.resolution(),
+                resolution.reason(),
+                resolution.connectionId(),
+                resolution.provenance()
+            );
+            return true;
+        } catch (RuntimeException invalidSnapshot) {
+            return false;
         }
     }
 
@@ -2320,6 +2450,21 @@ final class ProofExecutionCoordinator
         void close();
     }
 
+    record PublicationInvariant(
+        boolean outcomeSelected,
+        int expectedPrimaryResolutionCount,
+        int primaryResolutionCount,
+        boolean strictPrimaryResolutions,
+        boolean resultReadyCompletedNormally,
+        boolean resultIdentityPublished,
+        boolean finalizationReadyCompletedNormally,
+        boolean finalizationComplete,
+        boolean finalizing,
+        boolean finalizationOwnerPresent,
+        boolean authoritativeOutcomeBoundaryPending,
+        int resultConstructionRecoveryCount
+    ) {}
+
     @FunctionalInterface
     interface ObservationRefresher {
         CompletionStage<Void> refresh(Set<ConnectionId> connectionIds);
@@ -2335,6 +2480,14 @@ final class ProofExecutionCoordinator
         default void evidenceWindowCaptured() {}
 
         default void resultCreatedBeforeCompletionSubmission() {}
+
+        default void authoritativeOutcomeSelectedBeforeFinalization() {}
+
+        default void beforeAuthoritativeOperationBoundary() {}
+
+        default RuntimeException resultConstructionFailure() {
+            return null;
+        }
     }
 
     @FunctionalInterface
@@ -2543,6 +2696,8 @@ final class ProofExecutionCoordinator
         private boolean finalizing;
         private boolean finalizationComplete;
         private boolean factBatchActive;
+        private boolean authoritativeOutcomeBoundaryPending;
+        private int resultConstructionRecoveryCount;
         private PendingCompletion pendingCompletion;
         private boolean activationReached;
         private ProofEvidenceWindowTracker.EvidenceWindow evidenceWindow;

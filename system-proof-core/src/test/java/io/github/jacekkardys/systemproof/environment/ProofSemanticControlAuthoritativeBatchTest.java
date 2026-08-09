@@ -519,8 +519,7 @@ class ProofSemanticControlAuthoritativeBatchTest {
             assertThat(value.reason()).isNotNull();
             assertThat(value.provenance()).doesNotHaveDuplicates();
         });
-        assertThat(execution.result()).isSameAs(result);
-        assertThat(execution.evaluate()).isSameAs(result);
+        ProofPublicationAssertions.assertNormallyPublishedOnce(execution, result);
     }
 
     private static void assertResolution(

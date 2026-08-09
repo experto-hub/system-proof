@@ -20,7 +20,14 @@ import io.github.jacekkardys.systemproof.observation.InteractionRef;
 import io.github.jacekkardys.systemproof.observation.SessionId;
 import io.github.jacekkardys.systemproof.topology.ConnectionId;
 
-/** Environment-owned linearizable subject registry and current-state journal index. */
+/**
+ * Environment-owned linearizable subject registry and current-state journal index.
+ *
+ * <p>Mutating publications enter the proof fact-batch boundary before this registry monitor.
+ * They release the registry before proof evaluation receives the complete fact batch. The global
+ * order is semantic controls, authoritative-operation boundary, proof subjects, journal
+ * publication, proof evaluation; completion delivery runs only after all of them are released.
+ */
 final class ProofSubjectRegistry implements ProofSubjects {
     private static final long FIRST_SUBJECT_VALUE = 1L;
 
@@ -37,16 +44,29 @@ final class ProofSubjectRegistry implements ProofSubjects {
     }
 
     @Override
-    public synchronized ProofSubjectRef create() {
-        requireAccepting("create proof subjects");
-        ProofSubjectRef subject = createReference();
-        events.proofSubjectCreated(subject);
-        subjects.put(subject, new SubjectState());
-        return subject;
+    public ProofSubjectRef create() {
+        return events.proofFactBatch(() -> {
+            synchronized (this) {
+                requireAccepting("create proof subjects");
+                ProofSubjectRef subject = createReference();
+                events.proofSubjectCreated(subject);
+                subjects.put(subject, new SubjectState());
+                return subject;
+            }
+        });
     }
 
     @Override
-    public synchronized void arm(ProofSubjectRef subject, CorrelationKey key) {
+    public void arm(ProofSubjectRef subject, CorrelationKey key) {
+        events.proofFactBatch(() -> {
+            synchronized (this) {
+                armLocked(subject, key);
+            }
+            return null;
+        });
+    }
+
+    private void armLocked(ProofSubjectRef subject, CorrelationKey key) {
         requireAccepting("arm proof subjects");
         SubjectState subjectState = requireSubject(subject);
         key = Objects.requireNonNull(key, "key must not be null");
@@ -119,7 +139,19 @@ final class ProofSubjectRegistry implements ProofSubjects {
         };
     }
 
-    synchronized void publish(
+    void publish(
+        InteractionRef interactionRef,
+        CorrelationContribution<?> contribution
+    ) {
+        events.proofFactBatch(() -> {
+            synchronized (this) {
+                publishLocked(interactionRef, contribution);
+            }
+            return null;
+        });
+    }
+
+    private void publishLocked(
         InteractionRef interactionRef,
         CorrelationContribution<?> contribution
     ) {

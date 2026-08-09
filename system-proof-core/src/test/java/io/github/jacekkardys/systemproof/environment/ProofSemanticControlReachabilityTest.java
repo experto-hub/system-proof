@@ -439,6 +439,7 @@ class ProofSemanticControlReachabilityTest {
             assertThat(value.reason()).isNotNull();
             assertThat(value.provenance()).doesNotHaveDuplicates();
         });
+        ProofPublicationAssertions.assertNormallyPublishedOnce(execution, result);
     }
 
     private static void assertEstablishedProvenance(

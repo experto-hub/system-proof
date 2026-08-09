@@ -156,7 +156,28 @@ replay. A relevant selector trust failure is emitted before ordinary matches and
 `CONTROL`; compatible sibling facts remain primary, while a later incompatible fact is retained
 only as a bounded type-only secondary diagnostic. An unrelated control that is absent from the
 frozen plan cannot suppress a valid required violation. Independent events before or after the
-operation remain independently ordered. Every semantic-control
+operation remain independently ordered.
+
+The global nested lock order is semantic controls, the authoritative-operation boundary, proof
+subjects, journal publication, proof evaluation, and then completion delivery after all framework
+monitors are released. Subject creation, arming, and correlation-candidate publication use the
+same authoritative boundary as controls. A subject mutation and its fact therefore linearize
+entirely before or after a control operation; they cannot enter that operation's batch. The control
+action, selector execution, exact current-state correlation validation, journal append, public
+callback roots, and potentially blocking user code never run under the proof monitor. The proof
+monitor receives only the detached complete batch after the authoritative action. This removes any
+proof-to-subject acquisition while preserving control and journal order.
+
+Selecting the primary outcome freezes its complete primary resolutions but does not yet publish a
+`ProofResult`. Relevant independent failures remain eligible for deterministic, type-only,
+32-entry secondary retention until the same proof monitor atomically constructs the immutable
+result and changes state to `COMPLETED`. They cannot replace the primary outcome or resolutions;
+facts after `COMPLETED` are ignored. Strict result construction is the normal producer path. The
+last-resort fail-closed recovery is observable in package tests, is zero for every reachable
+coordinator scenario, and is exercised only by deliberately injected internal corruption. Fatal
+VM, thread termination, and linkage errors are not normalized as proof results.
+
+Every semantic-control
 transition first performs mandatory internal actions, then submits each committed public completion
 root independently behind a publication gate. Proof finalization cancels the deadline, performs
 prepared-control transitions, catches cleanup failures, deterministically orders and caps retained
