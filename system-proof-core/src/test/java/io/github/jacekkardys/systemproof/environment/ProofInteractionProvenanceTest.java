@@ -51,6 +51,72 @@ class ProofInteractionProvenanceTest {
             );
             assertThat(guardResolution(
                 descriptor,
+                ProofResolution.UNREACHED,
+                ProofResolutionReason.CONTROL_UNREACHED,
+                Optional.empty(),
+                List.of()
+            ).provenance()).isEmpty();
+            assertThat(guardResolution(
+                descriptor,
+                ProofResolution.UNREACHED,
+                ProofResolutionReason.CONTROL_UNREACHED,
+                Optional.empty(),
+                List.of(ProofInteractionProvenance.predecessor(predecessor))
+            ).provenance()).singleElement();
+            for (List<ProofInteractionProvenance> progress : List.of(
+                List.<ProofInteractionProvenance>of(),
+                List.of(ProofInteractionProvenance.predecessor(predecessor)),
+                List.of(
+                    ProofInteractionProvenance.predecessor(predecessor),
+                    ProofInteractionProvenance.successor(successor)
+                )
+            )) {
+                assertThat(guardResolution(
+                    descriptor,
+                    ProofResolution.AMBIGUOUS,
+                    ProofResolutionReason.CONTROL_CORRELATION_INVALIDATED,
+                    Optional.empty(),
+                    progress
+                ).provenance()).isEqualTo(progress);
+                assertThat(guardResolution(
+                    descriptor,
+                    ProofResolution.FAILED,
+                    ProofResolutionReason.CONTROL_FAILED,
+                    Optional.empty(),
+                    progress
+                ).provenance()).isEqualTo(progress);
+            }
+            for (List<ProofInteractionProvenance> permitProgress : List.of(
+                List.of(ProofInteractionProvenance.predecessor(predecessor)),
+                List.of(
+                    ProofInteractionProvenance.predecessor(predecessor),
+                    ProofInteractionProvenance.successor(successor)
+                )
+            )) {
+                assertThat(guardResolution(
+                    descriptor,
+                    ProofResolution.MISSING,
+                    ProofResolutionReason.CONTROL_SESSION_ENDED,
+                    Optional.empty(),
+                    permitProgress
+                ).provenance()).isEqualTo(permitProgress);
+            }
+            assertThat(guardResolution(
+                descriptor,
+                ProofResolution.FAILED,
+                ProofResolutionReason.CONTROL_SELECTOR_FAILED,
+                Optional.empty(),
+                List.of()
+            ).provenance()).isEmpty();
+            assertThat(guardResolution(
+                descriptor,
+                ProofResolution.FAILED,
+                ProofResolutionReason.CONTROL_SELECTOR_FAILED,
+                Optional.empty(),
+                List.of(ProofInteractionProvenance.predecessor(predecessor))
+            ).provenance()).singleElement();
+            assertThat(guardResolution(
+                descriptor,
                 ProofResolution.VIOLATED,
                 ProofResolutionReason.CAUSAL_RELATION_VIOLATED,
                 Optional.of(connection),
@@ -76,6 +142,33 @@ class ProofInteractionProvenanceTest {
                 ProofResolutionReason.CONTROL_TIMED_OUT,
                 Optional.empty(),
                 List.of(ProofInteractionProvenance.successor(successor))
+            )).isInstanceOf(IllegalArgumentException.class);
+            assertThatThrownBy(() -> guardResolution(
+                descriptor,
+                ProofResolution.UNREACHED,
+                ProofResolutionReason.CONTROL_UNREACHED,
+                Optional.empty(),
+                List.of(
+                    ProofInteractionProvenance.predecessor(predecessor),
+                    ProofInteractionProvenance.successor(successor)
+                )
+            )).isInstanceOf(IllegalArgumentException.class);
+            assertThatThrownBy(() -> guardResolution(
+                descriptor,
+                ProofResolution.MISSING,
+                ProofResolutionReason.CONTROL_SESSION_ENDED,
+                Optional.empty(),
+                List.of()
+            )).isInstanceOf(IllegalArgumentException.class);
+            assertThatThrownBy(() -> guardResolution(
+                descriptor,
+                ProofResolution.FAILED,
+                ProofResolutionReason.CONTROL_SELECTOR_FAILED,
+                Optional.empty(),
+                List.of(
+                    ProofInteractionProvenance.predecessor(predecessor),
+                    ProofInteractionProvenance.successor(successor)
+                )
             )).isInstanceOf(IllegalArgumentException.class);
             assertThatThrownBy(() -> guardResolution(
                 descriptor,

@@ -147,10 +147,16 @@ The closed outcomes are exactly:
 - `ERROR`: framework, gateway, adapter, journal, control, stimulus, evaluator, or teardown trust
   failed before a violation became terminal.
 
-Primary-outcome linearization and completion finalization are separate. The first terminal
-transition fixes the outcome, but every fact emitted by that same authoritative permit decision is
-applied through one bounded proof-fact batch before the immutable resolution/stimulus snapshot is
-frozen. Independent events after that decision remain secondary. Every semantic-control
+Primary-outcome linearization and completion finalization are separate. Every authoritative
+semantic-control operation that can terminalize multiple controls--permit authorization,
+`forwarded`, `writeFailed`, `abandoned`, hold release/cancellation/timeout, guard
+cancellation/timeout, or required-observation failure--applies its complete bounded fact set before
+the immutable resolution/stimulus snapshot is frozen. This is current-state batching, not journal
+replay. A relevant selector trust failure is emitted before ordinary matches and fixes `ERROR` at
+`CONTROL`; compatible sibling facts remain primary, while a later incompatible fact is retained
+only as a bounded type-only secondary diagnostic. An unrelated control that is absent from the
+frozen plan cannot suppress a valid required violation. Independent events before or after the
+operation remain independently ordered. Every semantic-control
 transition first performs mandatory internal actions, then submits each committed public completion
 root independently behind a publication gate. Proof finalization cancels the deadline, performs
 prepared-control transitions, catches cleanup failures, deterministically orders and caps retained
@@ -181,12 +187,12 @@ resolution-reason-connection-provenance matrix. Provenance is role-aware and det
 hold, predecessor, and successor roles are explicit and are never inferred from connection identity.
 Only a guard control or causal relation may be `VIOLATED`, and both require an explicit successor,
 optionally after the predecessor. A satisfied guard or established relation requires a distinct
-predecessor followed by a distinct successor, including when both use the same connection. A
-non-violated partial
-terminal control may retain no interaction, its exact predecessor only, or—for a terminal event
-after successor authorization—the exact predecessor/successor pair. A timeout cannot retain the
-pair because authorization cancels its timer. Successor-only timeout, cancellation, ambiguity,
-missing-session, or failure provenance, duplicate references, and reversed roles are rejected. A
+predecessor followed by a distinct successor, including when both use the same connection.
+Non-violated guard provenance is reason-aware: cancellation, timeout, and selector failure retain
+no interaction or the predecessor only; correlation invalidation and control failure may also
+retain the pair after successor authorization; session abandonment requires predecessor permit
+progress and may retain the authorized pair. Successor-only non-violation, a cancellation pair,
+duplicate references, and reversed roles are rejected. A
 satisfied hold and every reached terminal hold retain exactly one `HOLD` reference. A pre-reach
 selector failure or ambiguous match has its exact reason, no `HOLD` reference, and missing hold
 evidence; an unreached cancellation may also have no interaction. `NOT_EVALUATED` has one exact terminal reason and

@@ -236,6 +236,12 @@ final class ProofRuntimeHarness implements AutoCloseable {
     static ProofRuntimeHarness startWithManualControlTimeout(
         ManualControlTimeoutScheduler scheduler
     ) {
+        return startWithControlTimeoutScheduler(scheduler);
+    }
+
+    static ProofRuntimeHarness startWithControlTimeoutScheduler(
+        SemanticControlCoordinator.TimeoutScheduler scheduler
+    ) {
         return new ProofRuntimeHarness(
             ProofOutcomeEvaluator.failClosed(),
             scheduler
@@ -320,6 +326,33 @@ final class ProofRuntimeHarness implements AutoCloseable {
             subject,
             requirement,
             selector(successor),
+            Duration.ofSeconds(30)
+        ));
+    }
+
+    SemanticPredecessorGuard declareNativeFlowGuard(
+        CorrelationKey flowKey,
+        Predicate<String> predecessor,
+        Predicate<String> successor,
+        String nativeReference
+    ) {
+        SemanticInteractionSelector<String> predecessorSelector = selector(predecessor)
+            .through(
+                flowKey,
+                ProofTestFixture.NativeCodec.INSTANCE,
+                ignored -> nativeReference
+            );
+        SemanticInteractionSelector<String> successorSelector = selector(successor)
+            .through(
+                flowKey,
+                ProofTestFixture.NativeCodec.INSTANCE,
+                ignored -> nativeReference
+            );
+        return controls.declareGuard(SemanticPredecessorGuardSpec.requiring(
+            subject,
+            io.github.jacekkardys.systemproof.control.SemanticPredecessorRequirement
+                .forwarded(predecessorSelector),
+            successorSelector,
             Duration.ofSeconds(30)
         ));
     }

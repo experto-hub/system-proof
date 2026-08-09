@@ -252,22 +252,39 @@ public record ProofObligationResolution(
                 ProofResolution.AMBIGUOUS,
                     ProofResolutionReason.CONTROL_CORRELATION_INVALIDATED,
                 ProofResolution.MISSING, ProofResolutionReason.CONTROL_SESSION_ENDED,
+                ProofResolution.FAILED, ProofResolutionReason.CONTROL_SELECTOR_FAILED,
                 ProofResolution.FAILED, ProofResolutionReason.CONTROL_FAILED),
             "Guard-control resolution and reason must agree"
         );
-        if (resolution == ProofResolution.SATISFIED) {
-            requireEstablishedProvenance(
+        switch (reason) {
+            case CONTROL_REACHED_EXPECTED_STATE -> requireEstablishedProvenance(
                 descriptor.predecessorConnectionId(),
                 descriptor.successorConnectionId(),
                 provenance
             );
-        } else if (resolution == ProofResolution.TIMED_OUT) {
-            requirePartialProvenance(descriptor.predecessorConnectionId(), provenance);
-        } else {
-            requireNonViolatedTerminalProvenance(
+            case CONTROL_UNREACHED, CONTROL_TIMED_OUT, CONTROL_SELECTOR_FAILED ->
+                requirePartialProvenance(
+                    descriptor.predecessorConnectionId(),
+                    provenance
+                );
+            case CONTROL_CORRELATION_INVALIDATED ->
+                requireNonViolatedTerminalProvenance(
+                    descriptor.predecessorConnectionId(),
+                    descriptor.successorConnectionId(),
+                    provenance
+                );
+            case CONTROL_SESSION_ENDED -> requirePermitProgressProvenance(
                 descriptor.predecessorConnectionId(),
                 descriptor.successorConnectionId(),
                 provenance
+            );
+            case CONTROL_FAILED -> requireNonViolatedTerminalProvenance(
+                descriptor.predecessorConnectionId(),
+                descriptor.successorConnectionId(),
+                provenance
+            );
+            default -> throw new IllegalArgumentException(
+                "Unexpected non-violated guard resolution reason " + reason
             );
         }
     }
@@ -357,6 +374,18 @@ public record ProofObligationResolution(
                 || exactSingle(provenance, Role.PREDECESSOR, predecessor)
                 || exactPair(provenance, predecessor, successor),
             "A non-violated terminal guard may retain predecessor progress and its successor"
+        );
+    }
+
+    private static void requirePermitProgressProvenance(
+        ConnectionId predecessor,
+        ConnectionId successor,
+        List<ProofInteractionProvenance> provenance
+    ) {
+        require(
+            exactSingle(provenance, Role.PREDECESSOR, predecessor)
+                || exactPair(provenance, predecessor, successor),
+            "An abandoned guard permit requires predecessor or authorized-successor progress"
         );
     }
 

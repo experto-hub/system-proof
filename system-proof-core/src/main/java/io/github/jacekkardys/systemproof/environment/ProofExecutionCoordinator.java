@@ -407,13 +407,24 @@ final class ProofExecutionCoordinator
         if (activeFactBatch.get() != null) {
             return action.get();
         }
+        ExecutionRecord record = execution;
+        boolean batchOpened = record != null
+            && record.outcome == null
+            && record.state != ProofExecutionState.COMPLETED
+            && !record.factBatchActive;
+        if (batchOpened) {
+            record.factBatchActive = true;
+        }
         List<ScenarioEvent> batch = new ArrayList<>();
         activeFactBatch.set(batch);
         try {
             return action.get();
         } finally {
             activeFactBatch.remove();
-            applyFacts(batch, true);
+            applyFacts(batch, false);
+            if (batchOpened) {
+                completeFactBatchLocked(record);
+            }
         }
     }
 
@@ -429,6 +440,15 @@ final class ProofExecutionCoordinator
             }
             try {
                 for (ScenarioEvent event : events) {
+                    PendingCompletion decisiveBefore = record == null
+                        ? null
+                        : record.pendingCompletion;
+                    List<RequirementStateSnapshot> statesBefore = decisiveBefore == null
+                        ? List.of()
+                        : snapshotStates(record);
+                    int secondaryBefore = record == null
+                        ? 0
+                        : record.secondaryDiagnostics.size();
                     try {
                         applyFactLocked(event);
                     } catch (RuntimeException | Error evaluatorFailure) {
@@ -441,6 +461,17 @@ final class ProofExecutionCoordinator
                                     FailureDetails.from(evaluatorFailure)
                                 )
                             );
+                        }
+                    }
+                    if (decisiveBefore != null
+                        && !compatibleWith(
+                            decisiveBefore.outcome(),
+                            record.states
+                        )) {
+                        restoreStates(record, statesBefore);
+                        record.pendingCompletion = decisiveBefore;
+                        if (record.secondaryDiagnostics.size() == secondaryBefore) {
+                            retainIncompatibleBatchFact(record, event);
                         }
                     }
                 }
@@ -1350,8 +1381,22 @@ final class ProofExecutionCoordinator
                 );
                 completeLocked(record, ProofOutcome.INCONCLUSIVE, null);
             }
-            case SELECTOR_EVALUATION, WRITE_FAILURE, REQUIRED_OBSERVATION_FAILURE,
-                 INTERNAL_FAILURE -> {
+            case SELECTOR_EVALUATION -> {
+                control.set(
+                    ProofResolution.FAILED,
+                    ProofResolutionReason.CONTROL_SELECTOR_FAILED,
+                    Optional.empty(),
+                    provenance
+                );
+                if (record.state != ProofExecutionState.ACTIVATING) {
+                    completeLocked(
+                        record,
+                        ProofOutcome.ERROR,
+                        diagnostic(ProofFailureStage.CONTROL, new ControlFailure())
+                    );
+                }
+            }
+            case WRITE_FAILURE, REQUIRED_OBSERVATION_FAILURE, INTERNAL_FAILURE -> {
                 control.set(
                     ProofResolution.FAILED,
                     ProofResolutionReason.CONTROL_FAILED,
@@ -1747,6 +1792,62 @@ final class ProofExecutionCoordinator
         }
     }
 
+    private static List<RequirementStateSnapshot> snapshotStates(ExecutionRecord record) {
+        return record.states.stream()
+            .map(RequirementState::stateSnapshot)
+            .toList();
+    }
+
+    private static void restoreStates(
+        ExecutionRecord record,
+        List<RequirementStateSnapshot> snapshots
+    ) {
+        if (record.states.size() != snapshots.size()) {
+            throw new IllegalStateException("Proof requirement state cardinality changed");
+        }
+        for (int index = 0; index < record.states.size(); index++) {
+            record.states.get(index).restore(snapshots.get(index));
+        }
+    }
+
+    private static boolean compatibleWith(
+        ProofOutcome outcome,
+        List<RequirementState> states
+    ) {
+        boolean violated = states.stream().anyMatch(
+            state -> state.resolution == ProofResolution.VIOLATED
+        );
+        boolean failed = states.stream().anyMatch(
+            state -> state.resolution == ProofResolution.FAILED
+        );
+        return switch (outcome) {
+            case ERROR -> !violated;
+            case VIOLATED -> !failed;
+            case INCONCLUSIVE -> !violated && !failed;
+            case PROVED -> states.stream().allMatch(
+                state -> state.resolution == ProofResolution.SATISFIED
+            );
+        };
+    }
+
+    private void retainIncompatibleBatchFact(
+        ExecutionRecord record,
+        ScenarioEvent event
+    ) {
+        if (event instanceof FailureEvent failure && relevantFailure(record, failure)) {
+            addSecondary(
+                record,
+                new ProofDiagnostic(failureStage(failure), failure.failure())
+            );
+        } else if (event instanceof SemanticHoldEvent
+            || event instanceof SemanticPredecessorGuardEvent) {
+            addSecondary(
+                record,
+                diagnostic(ProofFailureStage.CONTROL, new ControlFailure())
+            );
+        }
+    }
+
     private static void markNotEvaluatedAfterTerminal(ExecutionRecord record) {
         for (RequirementState state : record.states) {
             if (state.resolution != ProofResolution.NOT_EVALUATED) {
@@ -1902,31 +2003,22 @@ final class ProofExecutionCoordinator
 
         ProofResult frozen;
         SemanticControlCoordinator.CompletionGate publicationGate = controls.newCompletionGate();
-        try {
-            synchronized (this) {
-                frozen = new ProofResult(
-                    record.plan.id(),
-                    record.plan.title(),
-                    record.outcome,
-                    record.plan.primarySubject(),
-                    record.primaryStimulus,
-                    record.primaryEvaluation,
-                    record.primaryResolutions,
-                    Optional.ofNullable(record.primaryFailure),
-                    List.copyOf(record.secondaryDiagnostics)
+        synchronized (this) {
+            try {
+                frozen = freezeResultLocked(record);
+            } catch (RuntimeException | Error constructionFailure) {
+                frozen = recoverResultConstructionFailureLocked(
+                    record,
+                    constructionFailure
                 );
-                record.result = frozen;
-                record.state = ProofExecutionState.COMPLETED;
             }
+            record.result = frozen;
+            record.state = ProofExecutionState.COMPLETED;
+        }
+        try {
             boundaryObserver.resultCreatedBeforeCompletionSubmission();
-        } catch (RuntimeException | Error failure) {
-            synchronized (this) {
-                record.finalizing = false;
-                record.finalizationOwner = null;
-            }
-            record.resultReady.completeExceptionally(failure);
-            record.finalizationReady.complete(null);
-            return;
+        } catch (RuntimeException | Error ignored) {
+            // A package-private boundary observer cannot poison immutable result publication.
         }
         if (controlNotifications != null) {
             controls.submitPreparedPublicCompletions(
@@ -1942,6 +2034,48 @@ final class ProofExecutionCoordinator
             record.finalizationOwner = null;
         }
         record.finalizationReady.complete(null);
+    }
+
+    private static ProofResult freezeResultLocked(ExecutionRecord record) {
+        return new ProofResult(
+            record.plan.id(),
+            record.plan.title(),
+            record.outcome,
+            record.plan.primarySubject(),
+            record.primaryStimulus,
+            record.primaryEvaluation,
+            record.primaryResolutions,
+            Optional.ofNullable(record.primaryFailure),
+            List.copyOf(record.secondaryDiagnostics)
+        );
+    }
+
+    private ProofResult recoverResultConstructionFailureLocked(
+        ExecutionRecord record,
+        Throwable constructionFailure
+    ) {
+        if (record.primaryFailure != null) {
+            addSecondary(record, record.primaryFailure);
+        }
+        record.outcome = ProofOutcome.ERROR;
+        record.primaryFailure = new ProofDiagnostic(
+            ProofFailureStage.EVALUATION,
+            FailureDetails.from(constructionFailure)
+        );
+        for (RequirementState state : record.states) {
+            state.set(
+                ProofResolution.NOT_EVALUATED,
+                ProofResolutionReason.NOT_EVALUATED_AFTER_TERMINAL_OUTCOME,
+                state.connectionId,
+                List.of()
+            );
+        }
+        record.primaryResolutions = record.states.stream()
+            .map(RequirementState::snapshot)
+            .toList();
+        record.primaryStimulus = stimulusSnapshot(record, ProofOutcome.ERROR);
+        record.primaryEvaluation = evaluationSnapshot(record, ProofOutcome.ERROR);
+        return freezeResultLocked(record);
     }
 
     private ProofResult awaitResult(ExecutionRecord record) {
@@ -2130,7 +2264,8 @@ final class ProofExecutionCoordinator
         ExecutionRecord record,
         ProofDiagnostic diagnostic
     ) {
-        if (record.state == ProofExecutionState.COMPLETED || !record.finalizing) {
+        if (record.state == ProofExecutionState.COMPLETED
+            || (!record.finalizing && !record.factBatchActive)) {
             return;
         }
         record.secondaryDiagnostics.add(Objects.requireNonNull(
@@ -2501,6 +2636,41 @@ final class ProofExecutionCoordinator
                 connectionId,
                 provenance
             );
+        }
+
+        private RequirementStateSnapshot stateSnapshot() {
+            return new RequirementStateSnapshot(
+                resolution,
+                reason,
+                connectionId,
+                provenance
+            );
+        }
+
+        private void restore(RequirementStateSnapshot snapshot) {
+            set(
+                snapshot.resolution(),
+                snapshot.reason(),
+                snapshot.connectionId(),
+                snapshot.provenance()
+            );
+        }
+    }
+
+    private record RequirementStateSnapshot(
+        ProofResolution resolution,
+        ProofResolutionReason reason,
+        Optional<ConnectionId> connectionId,
+        List<ProofInteractionProvenance> provenance
+    ) {
+        private RequirementStateSnapshot {
+            Objects.requireNonNull(resolution, "resolution must not be null");
+            Objects.requireNonNull(reason, "reason must not be null");
+            Objects.requireNonNull(connectionId, "connectionId must not be null");
+            provenance = List.copyOf(Objects.requireNonNull(
+                provenance,
+                "provenance must not be null"
+            ));
         }
     }
 
