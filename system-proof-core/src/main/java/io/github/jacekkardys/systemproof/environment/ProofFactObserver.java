@@ -39,7 +39,15 @@ interface ProofFactObserver {
         return result;
     }
 
+    /** Records only a non-fatal journal failure as a fail-closed proof intent. */
     default void journalFailure(Throwable failure) {}
+
+    /** Rethrows JVM-fatal failures before they can become proof facts or diagnostics. */
+    static void rethrowFatalJvmFailure(Throwable failure) {
+        if (failure instanceof Error fatal && !(failure instanceof AssertionError)) {
+            throw fatal;
+        }
+    }
 
     @FunctionalInterface
     interface FinalizationHandoff {

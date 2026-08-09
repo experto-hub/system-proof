@@ -70,7 +70,11 @@ that was already armed; cancellation never authorizes held traffic. Only after a
 armed does the control coordinator invoke an internal activation boundary while retaining its
 monitor. That boundary atomically enters `ACTIVE`; autonomous control terminal transitions cannot
 interleave between the final armed validation and activation. The deadline is scheduled outside
-framework monitors and installed only if the execution is still active.
+framework monitors. Installation owns an explicit readiness boundary: a task returned after a
+concurrent outcome selection is still stored and cancelled exactly once before result freeze.
+Successful installation releases readiness and offers the single finalization claim. A non-fatal
+installation failure selects `ERROR` only when no primary exists; otherwise it is retained as a
+bounded secondary diagnostic. Fatal scheduler failures release readiness and propagate unchanged.
 
 The observation owner assigns every `InteractionRef` and records its session/direction ordinal
 before journal publication and any proof or control callback. At the control-owned activation
@@ -182,6 +186,12 @@ owner. Normal and exceptional operation exits release the handoff exactly once. 
 failure completes both internal readiness futures exceptionally and clears the owner and boundary
 state, while fatal VM, thread-termination, and linkage errors still propagate.
 
+Deadline installation is a second waitable input to the same finalization claim. A finalizer that
+encounters either an unreleased authoritative-operation handoff or an in-flight deadline leaves all
+framework monitors, waits on that readiness, and retries. Semantic-control delivery therefore keeps
+its public gate closed while deadline installation is pending; mandatory permit actions run first,
+then the immutable result is published, and only then may public completion callbacks execute.
+
 The global nested lock order is semantic controls, the authoritative-operation boundary, proof
 subjects, journal publication, proof evaluation, and then completion delivery after all framework
 monitors are released. Subject creation, arming, and correlation-candidate publication use the
@@ -200,7 +210,10 @@ owning boundary. Rendering and SLF4J emission happen only afterward and are non-
 non-fatal renderer or sink failures are contained without another journal event, rollback, stale
 state, or proof-result diagnostic. Fatal errors still propagate after the committed state and fact.
 If the journal append itself fails, no matching runtime transition or proof fact is created; the
-existing type-only journal failure path selects fail-closed `ERROR`. Journal sequence, logging
+existing type-only journal failure path selects fail-closed `ERROR` only for non-fatal failures.
+Fatal VM, thread-termination, and linkage failures are rethrown before the journal-failure observer:
+they create no authoritative-operation intent, primary or secondary diagnostic, result, or recovery.
+Previously successful commits in the same operation remain authoritative. Journal sequence, logging
 thresholds, redaction, and declaration order are unchanged.
 
 `permit(...)` retains the semantic-control monitor and then enters the authoritative-operation
@@ -225,8 +238,9 @@ VM, thread termination, and linkage errors are not normalized as proof results.
 
 Every semantic-control
 transition first performs mandatory internal actions, then submits each committed public completion
-root independently behind a publication gate, releases its finalization-readiness handoff, and
-offers the single finalization claim. Proof finalization cancels the deadline, performs
+root independently behind a publication gate, releases its operation handoff, and waits for any
+in-flight deadline installation before offering the single finalization claim. Proof finalization
+cancels the installed deadline exactly once, performs
 prepared-control transitions, catches cleanup failures, deterministically orders and caps retained
 type-only secondary diagnostics at 32, freezes one result, accepts all finalization-owned completion
 work, publishes that result, and only then opens the gate. Concurrent close waits for this

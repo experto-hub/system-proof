@@ -72,8 +72,9 @@ import io.github.jacekkardys.systemproof.topology.ConnectionId;
  * mutation run outside this monitor. One per-thread authoritative-operation token retains journal
  * facts and direct proof intents in call order; only that detached complete operation enters proof
  * state. Completion delivery runs after every framework monitor and immutable-result gate is
- * released. A selected outcome owns one waitable finalization-readiness handoff; accessors wait on
- * it outside framework monitors and then compete for the single finalization claim.
+ * released. A selected outcome and an in-flight deadline installation own explicit waitable
+ * finalization-readiness boundaries; accessors wait on them outside framework monitors and then
+ * compete for the single finalization claim.
  */
 final class ProofExecutionCoordinator
     implements ProofFactObserver, ProofObservationListener {
@@ -359,37 +360,62 @@ final class ProofExecutionCoordinator
             return record.handle;
         }
 
+        DeadlineInstallationBoundary deadlineInstallation =
+            new DeadlineInstallationBoundary();
         synchronized (this) {
             if (record.outcome != null) {
                 return record.handle;
             }
-            record.deadlineInstalling = true;
+            record.deadlineInstallationBoundary = deadlineInstallation;
         }
+        DeadlineTask scheduled;
         try {
-            DeadlineTask scheduled = deadlineScheduler.schedule(
-                record.plan.deadline(),
-                () -> deadlineExpired(record)
+            boundaryObserver.deadlineInstallationStarted(record.handle);
+            scheduled = Objects.requireNonNull(
+                deadlineScheduler.schedule(
+                    record.plan.deadline(),
+                    () -> deadlineExpired(record)
+                ),
+                "Proof deadline scheduler must return a deadline task"
             );
-            synchronized (this) {
-                record.deadlineTask = scheduled;
-                record.deadlineInstalling = false;
-            }
-            finalizePending(record);
         } catch (RuntimeException | Error failure) {
-            rethrowFatal(failure);
-            synchronized (this) {
-                record.deadlineInstalling = false;
+            if (isFatal(failure)) {
+                releaseDeadlineInstallation(record, deadlineInstallation);
+                throw (Error) failure;
             }
-            complete(
-                record,
-                ProofOutcome.ERROR,
-                new ProofDiagnostic(
-                    ProofFailureStage.ACTIVATION,
-                    FailureDetails.from(failure)
-                )
-            );
+            synchronized (this) {
+                completeLocked(
+                    record,
+                    ProofOutcome.ERROR,
+                    new ProofDiagnostic(
+                        ProofFailureStage.ACTIVATION,
+                        FailureDetails.from(failure)
+                    )
+                );
+            }
+            releaseDeadlineInstallation(record, deadlineInstallation);
+            finalizePending(record);
+            return record.handle;
         }
+        synchronized (this) {
+            record.deadlineTask = scheduled;
+        }
+        releaseDeadlineInstallation(record, deadlineInstallation);
+        finalizePending(record);
         return record.handle;
+    }
+
+    private void releaseDeadlineInstallation(
+        ExecutionRecord record,
+        DeadlineInstallationBoundary boundary
+    ) {
+        boundary.release();
+        synchronized (this) {
+            if (record.deadlineInstallationBoundary == boundary
+                && record.outcome == null) {
+                record.deadlineInstallationBoundary = null;
+            }
+        }
     }
 
     private Predicate<InteractionRef> activateAtControlBoundary(ExecutionRecord record) {
@@ -625,6 +651,7 @@ final class ProofExecutionCoordinator
     @Override
     public void journalFailure(Throwable failure) {
         Objects.requireNonNull(failure, "failure must not be null");
+        rethrowFatal(failure);
         AuthoritativeOperationToken operation = activeOperation.get();
         if (operation != null) {
             operation.add(new JournalFailureIntent(failure));
@@ -636,6 +663,7 @@ final class ProofExecutionCoordinator
     }
 
     private void journalFailureAtBoundary(Throwable failure) {
+        rethrowFatal(failure);
         synchronized (this) {
             if (execution == null) {
                 return;
@@ -2084,16 +2112,13 @@ final class ProofExecutionCoordinator
     private void finalizePending(ExecutionRecord record) {
         boolean owner;
         while (true) {
-            AuthoritativeOutcomeBoundary boundary;
+            FinalizationReadinessBoundary pendingReadiness;
             synchronized (this) {
                 if (record.outcome == null || record.finalizationComplete) {
                     return;
                 }
-                if (record.deadlineInstalling) {
-                    return;
-                }
-                boundary = record.authoritativeOutcomeBoundary;
-                if (boundary == null || boundary.isReady()) {
+                pendingReadiness = pendingReadiness(record);
+                if (pendingReadiness == null) {
                     if (!record.finalizing) {
                         record.finalizing = true;
                         record.finalizationOwner = Thread.currentThread();
@@ -2106,7 +2131,7 @@ final class ProofExecutionCoordinator
                     break;
                 }
             }
-            boundary.awaitReady();
+            pendingReadiness.awaitReady();
         }
         if (!owner) {
             awaitFinalization(record);
@@ -2119,6 +2144,17 @@ final class ProofExecutionCoordinator
             failFinalization(record, failure);
             throw failure;
         }
+    }
+
+    private static FinalizationReadinessBoundary pendingReadiness(
+        ExecutionRecord record
+    ) {
+        DeadlineInstallationBoundary deadline = record.deadlineInstallationBoundary;
+        if (deadline != null && !deadline.isReady()) {
+            return deadline;
+        }
+        AuthoritativeOutcomeBoundary outcome = record.authoritativeOutcomeBoundary;
+        return outcome != null && !outcome.isReady() ? outcome : null;
     }
 
     private void finalizeOwned(ExecutionRecord record) {
@@ -2195,6 +2231,7 @@ final class ProofExecutionCoordinator
                 record.finalizing = false;
                 record.finalizationOwner = null;
                 record.authoritativeOutcomeBoundary = null;
+                record.deadlineInstallationBoundary = null;
             }
             record.finalizationReady.complete(null);
         } finally {
@@ -2208,6 +2245,7 @@ final class ProofExecutionCoordinator
             record.finalizing = false;
             record.finalizationOwner = null;
             record.authoritativeOutcomeBoundary = null;
+            record.deadlineInstallationBoundary = null;
         }
         record.resultReady.completeExceptionally(failure);
         record.finalizationReady.completeExceptionally(failure);
@@ -2291,9 +2329,11 @@ final class ProofExecutionCoordinator
     }
 
     private static void rethrowFatal(Throwable failure) {
-        if (failure instanceof Error fatal && !(failure instanceof AssertionError)) {
-            throw fatal;
-        }
+        ProofFactObserver.rethrowFatalJvmFailure(failure);
+    }
+
+    private static boolean isFatal(Throwable failure) {
+        return failure instanceof Error && !(failure instanceof AssertionError);
     }
 
     private RuntimeProofPrerequisite requirePrerequisite(ProofPrerequisite prerequisite) {
@@ -2530,6 +2570,7 @@ final class ProofExecutionCoordinator
             record.finalizing,
             record.finalizationOwner != null,
             record.authoritativeOutcomeBoundary != null,
+            record.deadlineInstallationBoundary != null,
             authoritativeOperationOwner != null,
             record.factBatchActive,
             record.pendingCompletion != null,
@@ -2561,6 +2602,10 @@ final class ProofExecutionCoordinator
     }
 
     interface DeadlineScheduler extends AutoCloseable {
+        /**
+         * Installs one deadline outside framework monitors. A returned task is authoritative and
+         * must remain cancellable even when an outcome was selected during this call.
+         */
         DeadlineTask schedule(Duration delay, Runnable action);
 
         @Override
@@ -2579,6 +2624,7 @@ final class ProofExecutionCoordinator
         boolean finalizing,
         boolean finalizationOwnerPresent,
         boolean authoritativeOutcomeBoundaryPending,
+        boolean deadlineInstallationReadinessPresent,
         boolean authoritativeOperationOwnerPresent,
         boolean factBatchActive,
         boolean pendingCompletionPresent,
@@ -2602,6 +2648,8 @@ final class ProofExecutionCoordinator
         default void resultCreatedBeforeCompletionSubmission() {}
 
         default void authoritativeOutcomeSelectedBeforeFinalization() {}
+
+        default void deadlineInstallationStarted(ProofExecution execution) {}
 
         default void beforeAuthoritativeOperationBoundary() {}
 
@@ -2808,7 +2856,7 @@ final class ProofExecutionCoordinator
         private ProofEvaluationResolution primaryEvaluation;
         private ProofStimulusResolution stimulusTerminal;
         private DeadlineTask deadlineTask;
-        private boolean deadlineInstalling;
+        private DeadlineInstallationBoundary deadlineInstallationBoundary;
         private ActivationControls activationControls;
         private StimulusLifecycle stimulusLifecycle = StimulusLifecycle.NOT_STARTED;
         private ProofEvaluationState evaluationState = ProofEvaluationState.NOT_STARTED;
@@ -2876,6 +2924,7 @@ final class ProofExecutionCoordinator
         implements AuthoritativeOperationIntent {
         private JournalFailureIntent {
             Objects.requireNonNull(failure, "failure must not be null");
+            rethrowFatal(failure);
         }
     }
 
@@ -2912,26 +2961,32 @@ final class ProofExecutionCoordinator
         }
     }
 
-    private static final class AuthoritativeOutcomeBoundary
-        implements ProofFactObserver.FinalizationHandoff {
-        private final ExecutionRecord record;
+    private static class FinalizationReadinessBoundary {
         private final CompletableFuture<Void> ready = new CompletableFuture<>();
 
-        private AuthoritativeOutcomeBoundary(ExecutionRecord record) {
-            this.record = Objects.requireNonNull(record, "record must not be null");
-        }
-
-        @Override
         public void release() {
             ready.complete(null);
         }
 
-        private boolean isReady() {
+        final boolean isReady() {
             return ready.isDone();
         }
 
-        private void awaitReady() {
+        final void awaitReady() {
             ready.join();
+        }
+    }
+
+    private static final class DeadlineInstallationBoundary
+        extends FinalizationReadinessBoundary {}
+
+    private static final class AuthoritativeOutcomeBoundary
+        extends FinalizationReadinessBoundary
+        implements ProofFactObserver.FinalizationHandoff {
+        private final ExecutionRecord record;
+
+        private AuthoritativeOutcomeBoundary(ExecutionRecord record) {
+            this.record = Objects.requireNonNull(record, "record must not be null");
         }
     }
 

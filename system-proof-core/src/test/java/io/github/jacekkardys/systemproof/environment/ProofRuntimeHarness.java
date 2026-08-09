@@ -290,6 +290,18 @@ final class ProofRuntimeHarness implements AutoCloseable {
         );
     }
 
+    static ProofRuntimeHarness startWithDeadlineSchedulerAndBoundaryHooks(
+        ManualDeadlineScheduler scheduler,
+        BoundaryHooks hooks
+    ) {
+        return new ProofRuntimeHarness(
+            scheduler,
+            ProofOutcomeEvaluator.failClosed(),
+            new PassiveControlTimeoutScheduler(),
+            hooks
+        );
+    }
+
     static ProofRuntimeHarness startWithBoundaryHooks(BoundaryHooks hooks) {
         return new ProofRuntimeHarness(
             new ManualDeadlineScheduler(),
@@ -622,7 +634,7 @@ final class ProofRuntimeHarness implements AutoCloseable {
         );
     }
 
-    static final class ManualDeadlineScheduler
+    static class ManualDeadlineScheduler
         implements ProofExecutionCoordinator.DeadlineScheduler {
         private final AtomicReference<ScheduledDeadline> scheduled = new AtomicReference<>();
         private final CountDownLatch cancellationEntered;

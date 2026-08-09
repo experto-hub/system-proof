@@ -61,6 +61,7 @@ final class ProofPublicationAssertions {
         assertThat(invariant.finalizing()).isFalse();
         assertThat(invariant.finalizationOwnerPresent()).isFalse();
         assertThat(invariant.authoritativeOutcomeBoundaryPending()).isFalse();
+        assertThat(invariant.deadlineInstallationReadinessPresent()).isFalse();
         assertThat(invariant.authoritativeOperationOwnerPresent()).isFalse();
         assertThat(invariant.factBatchActive()).isFalse();
         assertThat(invariant.pendingCompletionPresent()).isFalse();

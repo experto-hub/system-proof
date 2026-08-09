@@ -53,7 +53,8 @@ import io.github.jacekkardys.systemproof.topology.ConnectionId;
 /**
  * Builds and publishes framework-owned facts through the single environment journal.
  * Proof-critical publication commits journal storage, matching runtime state, and the typed proof
- * fact before attempting non-authoritative best-effort diagnostic emission.
+ * fact before attempting non-authoritative best-effort diagnostic emission. Non-fatal append
+ * failures enter the proof journal-failure path; fatal JVM failures bypass it and propagate.
  */
 final class EnvironmentEventPublisher {
     private final ScenarioJournal journal;
@@ -388,6 +389,7 @@ final class EnvironmentEventPublisher {
         try {
             entry = journal.append(event);
         } catch (RuntimeException | Error failure) {
+            ProofFactObserver.rethrowFatalJvmFailure(failure);
             proofFacts.journalFailure(failure);
             throw failure;
         }
@@ -404,6 +406,7 @@ final class EnvironmentEventPublisher {
         try {
             entry = journal.append(event);
         } catch (RuntimeException | Error failure) {
+            ProofFactObserver.rethrowFatalJvmFailure(failure);
             proofFacts.journalFailure(failure);
             throw failure;
         }
@@ -416,9 +419,7 @@ final class EnvironmentEventPublisher {
         try {
             emitter.framework(entry, level);
         } catch (RuntimeException | Error failure) {
-            if (failure instanceof Error fatal && !(failure instanceof AssertionError)) {
-                throw fatal;
-            }
+            ProofFactObserver.rethrowFatalJvmFailure(failure);
             // Stored proof facts and current state are authoritative; diagnostics are not.
         }
     }
