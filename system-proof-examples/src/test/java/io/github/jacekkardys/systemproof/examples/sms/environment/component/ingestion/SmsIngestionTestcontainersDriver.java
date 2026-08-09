@@ -16,10 +16,19 @@ import io.github.jacekkardys.systemproof.testcontainers.component.Testcontainers
 public final class SmsIngestionTestcontainersDriver
     extends TestcontainersDriver<SmsIngestionConfig, Void, SmsIngestionComponent> {
     private final Driver configuration;
+    private final AcknowledgementMode acknowledgementMode;
 
     public SmsIngestionTestcontainersDriver(@NonNull Driver configuration) {
+        this(configuration, AcknowledgementMode.AFTER_COMMIT);
+    }
+
+    public SmsIngestionTestcontainersDriver(
+        @NonNull Driver configuration,
+        @NonNull AcknowledgementMode acknowledgementMode
+    ) {
         super(SmsIngestionComponent.class);
         this.configuration = configuration;
+        this.acknowledgementMode = acknowledgementMode;
     }
 
     @Override
@@ -35,6 +44,10 @@ public final class SmsIngestionTestcontainersDriver
             )
             .environment("SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE", "2")
             .environment("SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE", "1")
+            .environment(
+                "SYSTEM_PROOF_INGESTION_ACKNOWLEDGEMENT_MODE",
+                acknowledgementMode.configurationValue
+            )
             .waitForHttp(
                 httpPort,
                 configuration.readinessPath(),
@@ -55,5 +68,17 @@ public final class SmsIngestionTestcontainersDriver
             return ContainerPlan.container(ReferenceImages.ingestion());
         }
         return ContainerPlan.container(DockerImageName.parse(configuration.image()));
+    }
+
+    /** Explicit reference-application behavior selected by the owning test environment. */
+    public enum AcknowledgementMode {
+        AFTER_COMMIT("after-commit"),
+        BEFORE_COMMIT("before-commit");
+
+        private final String configurationValue;
+
+        AcknowledgementMode(String configurationValue) {
+            this.configurationValue = configurationValue;
+        }
     }
 }

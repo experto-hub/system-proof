@@ -1,12 +1,8 @@
 package io.github.jacekkardys.systemproof.examples.sms;
 
-import static io.github.jacekkardys.systemproof.testcontainers.gateway.TcpEndpointAdapter.endpoint;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
 
-import java.net.InetSocketAddress;
-import java.net.URI;
-import java.net.URISyntaxException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -25,39 +21,24 @@ import org.junit.jupiter.api.Test;
 import io.github.jacekkardys.systemproof.control.SemanticHold;
 import io.github.jacekkardys.systemproof.control.SemanticInteractionSelector;
 import io.github.jacekkardys.systemproof.control.SemanticHoldState;
-import io.github.jacekkardys.systemproof.endpoint.JdbcEndpoint;
-import io.github.jacekkardys.systemproof.endpoint.SmppEndpoint;
-import io.github.jacekkardys.systemproof.environment.ConnectionRouting;
 import io.github.jacekkardys.systemproof.environment.Environment;
-import io.github.jacekkardys.systemproof.environment.EnvironmentBuilder;
-import io.github.jacekkardys.systemproof.environment.EnvironmentLogging;
-import io.github.jacekkardys.systemproof.environment.EnvironmentTopology;
 import io.github.jacekkardys.systemproof.environment.state.ConnectionState;
 import io.github.jacekkardys.systemproof.environment.state.RoutingMode;
-import io.github.jacekkardys.systemproof.examples.sms.environment.component.ingestion.SmsIngestionComponent;
-import io.github.jacekkardys.systemproof.examples.sms.environment.component.jasmin.JasminComponent;
-import io.github.jacekkardys.systemproof.examples.sms.environment.component.postgres.PostgresComponent;
 import io.github.jacekkardys.systemproof.examples.sms.environment.component.postgres.SmsDatabaseOperations;
-import io.github.jacekkardys.systemproof.examples.sms.environment.component.rabbitmq.RabbitMqComponent;
-import io.github.jacekkardys.systemproof.examples.sms.environment.component.redis.RedisComponent;
-import io.github.jacekkardys.systemproof.examples.sms.environment.component.smsc.SmscComponent;
-import io.github.jacekkardys.systemproof.examples.sms.environment.component.smsc.UkarimSmscOperations;
 import io.github.jacekkardys.systemproof.examples.sms.environment.domain.SmsMessageFingerprint;
 import io.github.jacekkardys.systemproof.examples.sms.environment.domain.SmsPersistence;
 import io.github.jacekkardys.systemproof.examples.sms.environment.domain.TestSms;
+import io.github.jacekkardys.systemproof.examples.sms.environment.proof.AmlT1Environment;
 import io.github.jacekkardys.systemproof.http.HttpEvidence;
 import io.github.jacekkardys.systemproof.http.HttpEvidence.RequestCompleted;
 import io.github.jacekkardys.systemproof.http.HttpEvidence.ResponseCompleted;
 import io.github.jacekkardys.systemproof.http.HttpExchangeRef;
 import io.github.jacekkardys.systemproof.http.HttpProtocolAdapter;
 import io.github.jacekkardys.systemproof.journal.InteractionObservationEvent;
-import io.github.jacekkardys.systemproof.journal.LogLevel;
 import io.github.jacekkardys.systemproof.observation.EffectiveObservationStatus;
 import io.github.jacekkardys.systemproof.observation.EvidenceCodec;
 import io.github.jacekkardys.systemproof.observation.FlowDirection;
 import io.github.jacekkardys.systemproof.observation.ObservationRequirement;
-import io.github.jacekkardys.systemproof.observation.RequiredObservationProfile;
-import io.github.jacekkardys.systemproof.observation.RequiredObservationProfile.Capability;
 import io.github.jacekkardys.systemproof.postgresql.PostgresqlDurabilityRequirements;
 import io.github.jacekkardys.systemproof.postgresql.PostgresqlDurabilityRequirements.Table;
 import io.github.jacekkardys.systemproof.postgresql.PostgresqlEvidence;
@@ -75,7 +56,6 @@ import io.github.jacekkardys.systemproof.smpp.SmppEvidence.DeliverSmCompleted;
 import io.github.jacekkardys.systemproof.smpp.SmppEvidence.DeliverSmResponseCompleted;
 import io.github.jacekkardys.systemproof.smpp.SmppExchangeRef;
 import io.github.jacekkardys.systemproof.smpp.SmppProtocolAdapter;
-import io.github.jacekkardys.systemproof.testcontainers.gateway.InteractionGateway;
 import io.github.jacekkardys.systemproof.testcontainers.gateway.ProtocolLimits;
 import io.github.jacekkardys.systemproof.topology.ConnectionId;
 
@@ -84,18 +64,6 @@ import io.github.jacekkardys.systemproof.topology.ConnectionId;
 final class PostgresqlCorrelatedCommitIT {
     private static final int REPETITIONS = 5;
     private static final Duration TIMEOUT = Duration.ofSeconds(30);
-    private static final ProtocolLimits POSTGRESQL_LIMITS = new ProtocolLimits(
-        1024 * 1024,
-        2 * 1024 * 1024
-    );
-    private static final ProtocolLimits HTTP_LIMITS = new ProtocolLimits(
-        1024 * 1024,
-        2 * 1024 * 1024
-    );
-    private static final ProtocolLimits SMPP_LIMITS = new ProtocolLimits(
-        64 * 1024,
-        128 * 1024
-    );
     private static final PostgresqlDurabilityRequirements DURABILITY_REQUIREMENTS =
         new PostgresqlDurabilityRequirements(Set.of(
             new Table("public", "raw_sms_event"),
@@ -112,7 +80,7 @@ final class PostgresqlCorrelatedCommitIT {
         ProofMessage reconnectSource;
         TransactionRef transactionBeforeReconnect;
         try {
-            ObservedSmsEnvironment environment = ObservedSmsEnvironment.define(
+            AmlT1Environment environment = AmlT1Environment.observed(
                 postgresqlAdapter
             );
             try {
@@ -187,7 +155,7 @@ final class PostgresqlCorrelatedCommitIT {
             }
             return Optional.empty();
         };
-        ObservedSmsEnvironment environment = ObservedSmsEnvironment.define(
+        AmlT1Environment environment = AmlT1Environment.observed(
             new PostgresqlProtocolAdapter(failingPolicy)
         );
         SemanticHold hold = null;
@@ -233,7 +201,7 @@ final class PostgresqlCorrelatedCommitIT {
     }
 
     private static TransactionPair verifyTargetAfterUnrelatedCommit(
-        ObservedSmsEnvironment environment,
+        AmlT1Environment environment,
         ExecutorService submissions
     ) throws Exception {
         ProofMessage target = ProofMessage.create(environment);
@@ -300,7 +268,7 @@ final class PostgresqlCorrelatedCommitIT {
     }
 
     private static ConcurrentAttributions verifyConcurrentSubjects(
-        ObservedSmsEnvironment environment,
+        AmlT1Environment environment,
         ExecutorService submissions
     ) throws Exception {
         ProofMessage first = ProofMessage.create(environment);
@@ -368,7 +336,7 @@ final class PostgresqlCorrelatedCommitIT {
     }
 
     private static ProofMessage verifyRollbackAndAmbiguousRetry(
-        ObservedSmsEnvironment environment,
+        AmlT1Environment environment,
         ExecutorService submissions
     ) throws Exception {
         ProofMessage proof = ProofMessage.create(environment);
@@ -450,7 +418,7 @@ final class PostgresqlCorrelatedCommitIT {
         ProofMessage previousProof,
         TransactionRef previousTransaction
     ) throws Exception {
-        ObservedSmsEnvironment environment = ObservedSmsEnvironment.define(postgresqlAdapter);
+        AmlT1Environment environment = AmlT1Environment.observed(postgresqlAdapter);
         try {
             environment.start();
             assertRequiredObservedRoutes(environment);
@@ -491,7 +459,7 @@ final class PostgresqlCorrelatedCommitIT {
     }
 
     private static SemanticHold commitHold(
-        ObservedSmsEnvironment environment,
+        AmlT1Environment environment,
         ProofMessage proof
     ) {
         return environment.controls().arm(
@@ -510,7 +478,7 @@ final class PostgresqlCorrelatedCommitIT {
     }
 
     private static SemanticHold rollbackHold(
-        ObservedSmsEnvironment environment,
+        AmlT1Environment environment,
         ProofMessage proof
     ) {
         return environment.controls().arm(
@@ -529,7 +497,7 @@ final class PostgresqlCorrelatedCommitIT {
     }
 
     private static NativeAttribution awaitUniqueAttribution(
-        ObservedSmsEnvironment environment,
+        AmlT1Environment environment,
         ProofMessage proof
     ) {
         Awaitility.await("three-protocol subject attribution")
@@ -555,7 +523,7 @@ final class PostgresqlCorrelatedCommitIT {
     }
 
     private static NativeAttribution uniqueAttribution(
-        ObservedSmsEnvironment environment,
+        AmlT1Environment environment,
         ProofMessage proof
     ) {
         return new NativeAttribution(
@@ -578,7 +546,7 @@ final class PostgresqlCorrelatedCommitIT {
     }
 
     private static <T> T uniqueCorrelation(
-        ObservedSmsEnvironment environment,
+        AmlT1Environment environment,
         ProofMessage proof,
         EvidenceCodec<T> codec
     ) {
@@ -592,7 +560,7 @@ final class PostgresqlCorrelatedCommitIT {
     }
 
     private static void assertAttributionEvidence(
-        ObservedSmsEnvironment environment,
+        AmlT1Environment environment,
         NativeAttribution attribution
     ) {
         assertThat(smppEvidence(environment))
@@ -619,7 +587,7 @@ final class PostgresqlCorrelatedCommitIT {
     }
 
     private static void assertPersistedAtomically(
-        ObservedSmsEnvironment environment,
+        AmlT1Environment environment,
         TestSms message
     ) {
         SmsPersistence persisted = environment.database().await().rawAndOutboxVisible(message);
@@ -632,7 +600,7 @@ final class PostgresqlCorrelatedCommitIT {
     }
 
     private static void assertNotPersisted(
-        ObservedSmsEnvironment environment,
+        AmlT1Environment environment,
         TestSms message
     ) {
         assertThat(environment.database().snapshot(message))
@@ -643,7 +611,7 @@ final class PostgresqlCorrelatedCommitIT {
     }
 
     private static void awaitCommitSucceeded(
-        ObservedSmsEnvironment environment,
+        AmlT1Environment environment,
         TransactionRef transaction
     ) {
         Awaitility.await("matching PostgreSQL commit confirmation")
@@ -663,7 +631,7 @@ final class PostgresqlCorrelatedCommitIT {
     }
 
     private static void assertSecretSafe(
-        ObservedSmsEnvironment environment,
+        AmlT1Environment environment,
         List<ProofMessage> proofs,
         List<String> additionalSecrets,
         Throwable failure
@@ -720,7 +688,7 @@ final class PostgresqlCorrelatedCommitIT {
         }
     }
 
-    private static List<CommitAttempt> commitAttempts(ObservedSmsEnvironment environment) {
+    private static List<CommitAttempt> commitAttempts(AmlT1Environment environment) {
         return postgresqlEvidence(environment).stream()
             .filter(CommitAttempt.class::isInstance)
             .map(CommitAttempt.class::cast)
@@ -728,7 +696,7 @@ final class PostgresqlCorrelatedCommitIT {
     }
 
     private static List<CommitSucceeded> commitSuccesses(
-        ObservedSmsEnvironment environment
+        AmlT1Environment environment
     ) {
         return postgresqlEvidence(environment).stream()
             .filter(CommitSucceeded.class::isInstance)
@@ -736,7 +704,7 @@ final class PostgresqlCorrelatedCommitIT {
             .toList();
     }
 
-    private static List<Rollback> rollbacks(ObservedSmsEnvironment environment) {
+    private static List<Rollback> rollbacks(AmlT1Environment environment) {
         return postgresqlEvidence(environment).stream()
             .filter(Rollback.class::isInstance)
             .map(Rollback.class::cast)
@@ -744,16 +712,16 @@ final class PostgresqlCorrelatedCommitIT {
     }
 
     private static List<PostgresqlEvidence> postgresqlEvidence(
-        ObservedSmsEnvironment environment
+        AmlT1Environment environment
     ) {
         return evidence(environment, environment.postgresqlAdapter().evidenceCodec());
     }
 
-    private static List<HttpEvidence> httpEvidence(ObservedSmsEnvironment environment) {
+    private static List<HttpEvidence> httpEvidence(AmlT1Environment environment) {
         return evidence(environment, environment.httpAdapter().evidenceCodec());
     }
 
-    private static List<SmppEvidence> smppEvidence(ObservedSmsEnvironment environment) {
+    private static List<SmppEvidence> smppEvidence(AmlT1Environment environment) {
         return evidence(environment, environment.smppAdapter().evidenceCodec());
     }
 
@@ -767,14 +735,14 @@ final class PostgresqlCorrelatedCommitIT {
             .toList();
     }
 
-    private static void assertRequiredObservedRoutes(ObservedSmsEnvironment environment) {
+    private static void assertRequiredObservedRoutes(AmlT1Environment environment) {
         assertRequiredObservedRoute(environment, environment.smppConnectionId());
         assertRequiredObservedRoute(environment, environment.httpConnectionId());
         assertRequiredObservedRoute(environment, environment.databaseConnectionId());
     }
 
     private static void assertRequiredObservedRoute(
-        ObservedSmsEnvironment environment,
+        AmlT1Environment environment,
         ConnectionId connectionId
     ) {
         assertThat(environment.runtimeConnection(connectionId))
@@ -786,73 +754,6 @@ final class PostgresqlCorrelatedCommitIT {
                 assertThat(connection.effectiveObservationStatus())
                     .isEqualTo(EffectiveObservationStatus.ACTIVE);
             });
-    }
-
-    private static RequiredObservationProfile requiredProfile(
-        EvidenceCodec<?> evidenceCodec,
-        EvidenceCodec<?> referenceCodec
-    ) {
-        return new RequiredObservationProfile(
-            evidenceCodec.schemaId(),
-            Optional.of(referenceCodec.schemaId()),
-            Set.of(
-                Capability.CORRELATION_CONTRIBUTIONS,
-                Capability.SEMANTIC_CONTROL
-            ),
-            Set.of()
-        );
-    }
-
-    private static InetSocketAddress postgresqlAddress(JdbcEndpoint endpoint) {
-        URI uri = URI.create(endpoint.url().substring("jdbc:".length()));
-        return new InetSocketAddress(uri.getHost(), uri.getPort());
-    }
-
-    private static JdbcEndpoint replacePostgresqlAddress(
-        JdbcEndpoint endpoint,
-        String host,
-        int port
-    ) {
-        URI uri = URI.create(endpoint.url().substring("jdbc:".length()));
-        String query = uri.getRawQuery() == null ? "" : "?" + uri.getRawQuery();
-        return new JdbcEndpoint(
-            "jdbc:postgresql://" + host + ":" + port + uri.getRawPath() + query,
-            endpoint.username(),
-            endpoint.password()
-        );
-    }
-
-    private static InetSocketAddress httpAddress(URI endpoint) {
-        int port = endpoint.getPort() >= 0 ? endpoint.getPort() : 80;
-        return new InetSocketAddress(endpoint.getHost(), port);
-    }
-
-    private static URI replaceHttpAddress(URI endpoint, String host, int port) {
-        try {
-            return new URI(
-                endpoint.getScheme(),
-                endpoint.getUserInfo(),
-                host,
-                port,
-                endpoint.getPath(),
-                endpoint.getQuery(),
-                endpoint.getFragment()
-            );
-        } catch (URISyntaxException failure) {
-            throw new IllegalArgumentException("Cannot replace HTTP endpoint address", failure);
-        }
-    }
-
-    private static InetSocketAddress smppAddress(SmppEndpoint endpoint) {
-        return new InetSocketAddress(endpoint.host(), endpoint.port());
-    }
-
-    private static SmppEndpoint replaceSmppAddress(
-        SmppEndpoint endpoint,
-        String host,
-        int port
-    ) {
-        return new SmppEndpoint(host, port, endpoint.systemId(), endpoint.password());
     }
 
     private static final class ProofMessage {
@@ -873,7 +774,7 @@ final class PostgresqlCorrelatedCommitIT {
             this.subject = subject;
         }
 
-        private static ProofMessage create(ObservedSmsEnvironment environment) {
+        private static ProofMessage create(AmlT1Environment environment) {
             String discriminator = UUID.randomUUID().toString();
             return rearm(
                 environment,
@@ -883,7 +784,7 @@ final class PostgresqlCorrelatedCommitIT {
         }
 
         private static ProofMessage rearm(
-            ObservedSmsEnvironment environment,
+            AmlT1Environment environment,
             String discriminator,
             TestSms message
         ) {
@@ -935,157 +836,4 @@ final class PostgresqlCorrelatedCommitIT {
         NativeAttribution second
     ) {}
 
-    private static final class ObservedSmsEnvironment extends Environment {
-        private final SmscComponent smsc;
-        private final JasminComponent jasmin;
-        private final SmsIngestionComponent ingestion;
-        private final PostgresComponent database;
-        private final RabbitMqComponent broker;
-        private final SmppProtocolAdapter smppAdapter;
-        private final HttpProtocolAdapter httpAdapter;
-        private final PostgresqlProtocolAdapter postgresqlAdapter;
-
-        private ObservedSmsEnvironment(
-            EnvironmentTopology topology,
-            EnvironmentLogging logging,
-            ConnectionRouting routing,
-            SmscComponent smsc,
-            JasminComponent jasmin,
-            SmsIngestionComponent ingestion,
-            PostgresComponent database,
-            RabbitMqComponent broker,
-            SmppProtocolAdapter smppAdapter,
-            HttpProtocolAdapter httpAdapter,
-            PostgresqlProtocolAdapter postgresqlAdapter
-        ) {
-            super(topology, logging, routing);
-            this.smsc = smsc;
-            this.jasmin = jasmin;
-            this.ingestion = ingestion;
-            this.database = database;
-            this.broker = broker;
-            this.smppAdapter = smppAdapter;
-            this.httpAdapter = httpAdapter;
-            this.postgresqlAdapter = postgresqlAdapter;
-        }
-
-        private static ObservedSmsEnvironment define(
-            PostgresqlProtocolAdapter postgresqlAdapter
-        ) {
-            EnvironmentBuilder builder = new EnvironmentBuilder();
-            SmscComponent smsc = builder.component(SmscComponent.class);
-            JasminComponent jasmin = builder.component(JasminComponent.class);
-            SmsIngestionComponent ingestion = builder.component(SmsIngestionComponent.class);
-            PostgresComponent database = builder.component(PostgresComponent.class);
-            RabbitMqComponent broker = builder.component(RabbitMqComponent.class);
-            RedisComponent state = builder.component(RedisComponent.class);
-            builder
-                .logging(EnvironmentLogging.logs()
-                    .defaultComponentLevel(LogLevel.OFF))
-                .connect(jasmin.smpp(), smsc.smpp())
-                .connect(jasmin.sms(), ingestion.sms())
-                .connect(ingestion.jdbc(), database.jdbc())
-                .connect(jasmin.amqp(), broker.amqp())
-                .connect(jasmin.redis(), state.redis());
-
-            SmppProtocolAdapter smppAdapter = new SmppProtocolAdapter(
-                SmsMessageFingerprint.smppDeliverCorrelation()
-            );
-            HttpProtocolAdapter httpAdapter = new HttpProtocolAdapter(
-                SmsMessageFingerprint.httpCallbackCorrelation()
-            );
-            InteractionGateway gateway = new InteractionGateway();
-            ConnectionRouting routing = ConnectionRouting.routed(
-                jasmin.smpp().contract(),
-                requiredProfile(smppAdapter.evidenceCodec(), SmppExchangeRef.codec()),
-                gateway.tcp(
-                    endpoint(
-                        PostgresqlCorrelatedCommitIT::smppAddress,
-                        PostgresqlCorrelatedCommitIT::replaceSmppAddress
-                    ),
-                    smppAdapter,
-                    SMPP_LIMITS
-                )
-            ).withRoute(
-                jasmin.sms().contract(),
-                requiredProfile(httpAdapter.evidenceCodec(), HttpExchangeRef.codec()),
-                gateway.tcp(
-                    endpoint(
-                        PostgresqlCorrelatedCommitIT::httpAddress,
-                        PostgresqlCorrelatedCommitIT::replaceHttpAddress
-                    ),
-                    httpAdapter,
-                    HTTP_LIMITS
-                )
-            ).withRoute(
-                ingestion.jdbc().contract(),
-                requiredProfile(
-                    postgresqlAdapter.evidenceCodec(),
-                    TransactionRef.codec()
-                ),
-                gateway.tcp(
-                    endpoint(
-                        PostgresqlCorrelatedCommitIT::postgresqlAddress,
-                        PostgresqlCorrelatedCommitIT::replacePostgresqlAddress
-                    ),
-                    postgresqlAdapter,
-                    POSTGRESQL_LIMITS
-                )
-            );
-            return builder.build((topology, logging) -> new ObservedSmsEnvironment(
-                topology,
-                logging,
-                routing,
-                smsc,
-                jasmin,
-                ingestion,
-                database,
-                broker,
-                smppAdapter,
-                httpAdapter,
-                postgresqlAdapter
-            ));
-        }
-
-        private UkarimSmscOperations smsc() {
-            return operations(smsc);
-        }
-
-        private SmsDatabaseOperations database() {
-            return operations(database);
-        }
-
-        private ConnectionId smppConnectionId() {
-            return connectionFrom(jasmin.smpp()).id();
-        }
-
-        private ConnectionId httpConnectionId() {
-            return connectionFrom(jasmin.sms()).id();
-        }
-
-        private ConnectionId databaseConnectionId() {
-            return connectionFrom(ingestion.jdbc()).id();
-        }
-
-        private SmppProtocolAdapter smppAdapter() {
-            return smppAdapter;
-        }
-
-        private HttpProtocolAdapter httpAdapter() {
-            return httpAdapter;
-        }
-
-        private PostgresqlProtocolAdapter postgresqlAdapter() {
-            return postgresqlAdapter;
-        }
-
-        private List<String> credentials() {
-            return List.of(
-                smsc.configuration().password().reveal(),
-                jasmin.configuration().adminPassword().reveal(),
-                database.configuration().password().reveal(),
-                broker.configuration().password().reveal()
-            );
-        }
-    }
 }
