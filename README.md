@@ -392,7 +392,10 @@ gateway session. Their directions may differ; equal native-reference bytes on an
 or session never join. The two facts need not share one `InteractionRef`. Its codecs, predicate,
 and extractor run synchronously and therefore must be pure, fast, non-blocking, and side-effect
 free. A selector exception or overlapping matching holds fails closed; missing or ambiguous
-subject correlation does not match.
+subject correlation does not match. A selector candidate becomes held evidence only after the
+coordinator reaches `REACHED_HELD`. Selector failure or overlap between active holds before that
+state retains no `HOLD` provenance, leaves `HELD_INTERACTION` missing, completes `reached()`
+exceptionally, and closes the affected session.
 
 ## Semantic predecessor guards
 
@@ -419,7 +422,10 @@ position establishes neither boundary.
 The shared coordinator is the one linearization point. Predecessor first authorizes the successor;
 after successful successor forwarding the guard records an exact satisfied relation. Successor
 first records a terminal violation, returns `CLOSE_SESSION`, and forwards zero successor bytes. It
-does not wait for or accept a later predecessor. Missing or ambiguous subject/native-reference
+does not wait for or accept a later predecessor. Matching is evaluated against the guard state at
+the start of the current interaction: if an `ARMED` guard's predecessor and successor selectors
+both match that one interaction, it is an early successor with successor-only provenance, never a
+self-causal relation. Missing or ambiguous subject/native-reference
 correlation does not match, and other subjects remain independent. The complete state, lifecycle,
 journal, and safety contract is in [`ADR 0009`](docs/adr/0009-semantic-predecessor-guards.md).
 

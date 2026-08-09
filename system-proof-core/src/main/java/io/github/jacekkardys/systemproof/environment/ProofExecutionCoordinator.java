@@ -19,6 +19,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 import io.github.jacekkardys.systemproof.control.SemanticHoldFailure;
 import io.github.jacekkardys.systemproof.control.SemanticHoldRef;
 import io.github.jacekkardys.systemproof.control.SemanticHoldState;
@@ -76,6 +77,7 @@ final class ProofExecutionCoordinator
     private final DeadlineScheduler deadlineScheduler;
     private final ProofOutcomeEvaluator outcomeEvaluator;
     private final BoundaryObserver boundaryObserver;
+    private final ThreadLocal<List<ScenarioEvent>> activeFactBatch = new ThreadLocal<>();
     private ProofSubjectRegistry proofSubjects;
     private SemanticControlCoordinator controls;
     private RuntimeConnectionRegistry connections;
@@ -391,65 +393,104 @@ final class ProofExecutionCoordinator
     @Override
     public void fact(ScenarioEvent event) {
         Objects.requireNonNull(event, "event must not be null");
+        List<ScenarioEvent> batch = activeFactBatch.get();
+        if (batch != null) {
+            batch.add(event);
+            return;
+        }
+        applyFacts(List.of(event), false);
+    }
+
+    @Override
+    public synchronized <T> T factBatch(Supplier<T> action) {
+        action = Objects.requireNonNull(action, "action must not be null");
+        if (activeFactBatch.get() != null) {
+            return action.get();
+        }
+        List<ScenarioEvent> batch = new ArrayList<>();
+        activeFactBatch.set(batch);
         try {
-            synchronized (this) {
-                if (execution == null) {
-                    return;
-                }
-                if (execution.state == ProofExecutionState.COMPLETED) {
-                    return;
-                }
-                if (execution.outcome != null) {
-                    retainSecondary(execution, event);
-                    return;
-                }
-                if (execution.state == ProofExecutionState.ACTIVATING) {
-                    if (event instanceof FailureEvent failure
-                        && relevantFailure(execution, failure)) {
-                        completeLocked(
-                            execution,
-                            ProofOutcome.ERROR,
-                            new ProofDiagnostic(failureStage(failure), failure.failure())
-                        );
-                    }
-                    return;
-                }
-                if (execution.state != ProofExecutionState.ACTIVE) {
-                    return;
-                }
-                switch (event) {
-                    case CorrelationCandidateEvent candidate ->
-                        applyCorrelation(execution, candidate);
-                    case ProofSubjectArmedEvent armed ->
-                        applyCorrelationInvalidation(execution, armed);
-                    case SemanticHoldEvent hold -> applyHold(execution, hold);
-                    case SemanticPredecessorGuardEvent guard -> applyGuard(execution, guard);
-                    case FailureEvent failure -> {
-                        if (relevantFailure(execution, failure)) {
+            return action.get();
+        } finally {
+            activeFactBatch.remove();
+            applyFacts(batch, true);
+        }
+    }
+
+    private void applyFacts(List<ScenarioEvent> events, boolean authoritativeBatch) {
+        synchronized (this) {
+            ExecutionRecord record = execution;
+            boolean batchOpened = authoritativeBatch
+                && record != null
+                && record.outcome == null
+                && record.state != ProofExecutionState.COMPLETED;
+            if (batchOpened) {
+                record.factBatchActive = true;
+            }
+            try {
+                for (ScenarioEvent event : events) {
+                    try {
+                        applyFactLocked(event);
+                    } catch (RuntimeException | Error evaluatorFailure) {
+                        if (execution != null && execution.outcome == null) {
                             completeLocked(
                                 execution,
                                 ProofOutcome.ERROR,
-                                new ProofDiagnostic(failureStage(failure), failure.failure())
+                                new ProofDiagnostic(
+                                    ProofFailureStage.EVALUATION,
+                                    FailureDetails.from(evaluatorFailure)
+                                )
                             );
                         }
                     }
-                    default -> {
-                        // Unrelated typed journal facts do not affect proof current state.
-                    }
+                }
+            } finally {
+                if (batchOpened) {
+                    completeFactBatchLocked(record);
                 }
             }
-        } catch (RuntimeException | Error evaluatorFailure) {
-            synchronized (this) {
-                if (execution != null && execution.outcome == null) {
+        }
+    }
+
+    private void applyFactLocked(ScenarioEvent event) {
+        if (execution == null || execution.state == ProofExecutionState.COMPLETED) {
+            return;
+        }
+        if (execution.outcome != null) {
+            retainSecondary(execution, event);
+            return;
+        }
+        if (execution.state == ProofExecutionState.ACTIVATING) {
+            if (event instanceof FailureEvent failure && relevantFailure(execution, failure)) {
+                completeLocked(
+                    execution,
+                    ProofOutcome.ERROR,
+                    new ProofDiagnostic(failureStage(failure), failure.failure())
+                );
+            }
+            return;
+        }
+        if (execution.state != ProofExecutionState.ACTIVE) {
+            return;
+        }
+        switch (event) {
+            case CorrelationCandidateEvent candidate ->
+                applyCorrelation(execution, candidate);
+            case ProofSubjectArmedEvent armed ->
+                applyCorrelationInvalidation(execution, armed);
+            case SemanticHoldEvent hold -> applyHold(execution, hold);
+            case SemanticPredecessorGuardEvent guard -> applyGuard(execution, guard);
+            case FailureEvent failure -> {
+                if (relevantFailure(execution, failure)) {
                     completeLocked(
                         execution,
                         ProofOutcome.ERROR,
-                        new ProofDiagnostic(
-                            ProofFailureStage.EVALUATION,
-                            FailureDetails.from(evaluatorFailure)
-                        )
+                        new ProofDiagnostic(failureStage(failure), failure.failure())
                     );
                 }
+            }
+            default -> {
+                // Unrelated typed journal facts do not affect proof current state.
             }
         }
     }
@@ -1026,13 +1067,22 @@ final class ProofExecutionCoordinator
             .map(ProofInteractionProvenance::hold)
             .stream()
             .toList();
-        if (evidence != null && event.interactionRef().isPresent()) {
-            evidence.set(
-                ProofResolution.SATISFIED,
-                ProofResolutionReason.EVIDENCE_PRESENT,
-                Optional.of(event.connectionId()),
-                provenance
-            );
+        if (evidence != null) {
+            if (event.interactionRef().isPresent()) {
+                evidence.set(
+                    ProofResolution.SATISFIED,
+                    ProofResolutionReason.EVIDENCE_PRESENT,
+                    Optional.of(event.connectionId()),
+                    provenance
+                );
+            } else if (isPreReachTerminal(event)) {
+                evidence.set(
+                    ProofResolution.MISSING,
+                    ProofResolutionReason.EVIDENCE_MISSING,
+                    Optional.of(event.connectionId()),
+                    List.of()
+                );
+            }
         }
         if (control == null) {
             return;
@@ -1074,7 +1124,16 @@ final class ProofExecutionCoordinator
     ) {
         SemanticHoldFailure failure = event.failure().orElse(SemanticHoldFailure.INTERNAL_FAILURE);
         switch (failure) {
-            case CORRELATION_INVALIDATED, AMBIGUOUS_MATCH -> {
+            case AMBIGUOUS_MATCH -> {
+                control.set(
+                    ProofResolution.AMBIGUOUS,
+                    ProofResolutionReason.CONTROL_MATCH_AMBIGUOUS,
+                    Optional.of(event.connectionId()),
+                    List.of()
+                );
+                completeLocked(record, ProofOutcome.INCONCLUSIVE, null);
+            }
+            case CORRELATION_INVALIDATED -> {
                 control.set(
                     ProofResolution.AMBIGUOUS,
                     ProofResolutionReason.CONTROL_CORRELATION_INVALIDATED,
@@ -1092,7 +1151,20 @@ final class ProofExecutionCoordinator
                 );
                 completeLocked(record, ProofOutcome.INCONCLUSIVE, null);
             }
-            case SELECTOR_EVALUATION, WRITE_FAILURE, INTERNAL_FAILURE -> {
+            case SELECTOR_EVALUATION -> {
+                control.set(
+                    ProofResolution.FAILED,
+                    ProofResolutionReason.CONTROL_SELECTOR_FAILED,
+                    Optional.of(event.connectionId()),
+                    List.of()
+                );
+                completeLocked(
+                    record,
+                    ProofOutcome.ERROR,
+                    diagnostic(ProofFailureStage.CONTROL, new ControlFailure())
+                );
+            }
+            case WRITE_FAILURE, INTERNAL_FAILURE -> {
                 control.set(
                     ProofResolution.FAILED,
                     ProofResolutionReason.CONTROL_FAILED,
@@ -1106,6 +1178,11 @@ final class ProofExecutionCoordinator
                 );
             }
         }
+    }
+
+    private static boolean isPreReachTerminal(SemanticHoldEvent event) {
+        return event.state() == SemanticHoldState.CANCELLED
+            || event.state() == SemanticHoldState.FAILED;
     }
 
     private void applyGuard(ExecutionRecord record, SemanticPredecessorGuardEvent event) {
@@ -1630,6 +1707,14 @@ final class ProofExecutionCoordinator
         ProofOutcome outcome,
         ProofDiagnostic failure
     ) {
+        if (record.factBatchActive) {
+            if (record.pendingCompletion == null) {
+                record.pendingCompletion = new PendingCompletion(outcome, failure);
+            } else if (failure != null) {
+                addSecondary(record, failure);
+            }
+            return;
+        }
         if (record.outcome != null) {
             if (failure != null) {
                 addSecondary(record, failure);
@@ -1653,11 +1738,18 @@ final class ProofExecutionCoordinator
         }
     }
 
+    private void completeFactBatchLocked(ExecutionRecord record) {
+        PendingCompletion pending = record.pendingCompletion;
+        record.pendingCompletion = null;
+        record.factBatchActive = false;
+        if (pending != null) {
+            completeLocked(record, pending.outcome(), pending.failure());
+        }
+    }
+
     private static void markNotEvaluatedAfterTerminal(ExecutionRecord record) {
         for (RequirementState state : record.states) {
-            if (state.resolution == ProofResolution.SATISFIED
-                || state.resolution == ProofResolution.VIOLATED
-                || state.resolution == ProofResolution.FAILED) {
+            if (state.resolution != ProofResolution.NOT_EVALUATED) {
                 continue;
             }
             state.set(
@@ -2315,6 +2407,8 @@ final class ProofExecutionCoordinator
         private Thread finalizationOwner;
         private boolean finalizing;
         private boolean finalizationComplete;
+        private boolean factBatchActive;
+        private PendingCompletion pendingCompletion;
         private boolean activationReached;
         private ProofEvidenceWindowTracker.EvidenceWindow evidenceWindow;
 
@@ -2345,6 +2439,15 @@ final class ProofExecutionCoordinator
             requiredObservationConnections = java.util.Collections.unmodifiableSet(
                 requiredConnections
             );
+        }
+    }
+
+    private record PendingCompletion(
+        ProofOutcome outcome,
+        ProofDiagnostic failure
+    ) {
+        private PendingCompletion {
+            Objects.requireNonNull(outcome, "outcome must not be null");
         }
     }
 

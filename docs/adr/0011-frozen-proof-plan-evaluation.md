@@ -148,7 +148,9 @@ The closed outcomes are exactly:
   failed before a violation became terminal.
 
 Primary-outcome linearization and completion finalization are separate. The first terminal
-transition fixes the outcome and an immutable resolution/stimulus snapshot. Every semantic-control
+transition fixes the outcome, but every fact emitted by that same authoritative permit decision is
+applied through one bounded proof-fact batch before the immutable resolution/stimulus snapshot is
+frozen. Independent events after that decision remain secondary. Every semantic-control
 transition first performs mandatory internal actions, then submits each committed public completion
 root independently behind a publication gate. Proof finalization cancels the deadline, performs
 prepared-control transitions, catches cleanup failures, deterministically orders and caps retained
@@ -185,8 +187,9 @@ terminal control may retain no interaction, its exact predecessor only, or—for
 after successor authorization—the exact predecessor/successor pair. A timeout cannot retain the
 pair because authorization cancels its timer. Successor-only timeout, cancellation, ambiguity,
 missing-session, or failure provenance, duplicate references, and reversed roles are rejected. A
-satisfied hold and every reached terminal hold retain exactly one `HOLD` reference; only an
-unreached cancellation may have no interaction. `NOT_EVALUATED` has one exact terminal reason and
+satisfied hold and every reached terminal hold retain exactly one `HOLD` reference. A pre-reach
+selector failure or ambiguous match has its exact reason, no `HOLD` reference, and missing hold
+evidence; an unreached cancellation may also have no interaction. `NOT_EVALUATED` has one exact terminal reason and
 no provenance. Satisfied items remain satisfied after an independent
 decisive item regardless of declaration order. Its
 deterministic compact `ProofReport` is limited to 64 KiB characters. The outcome and decisive

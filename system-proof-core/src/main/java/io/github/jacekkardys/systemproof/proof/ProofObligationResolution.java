@@ -192,19 +192,29 @@ public record ProofObligationResolution(
                     ProofResolutionReason.CONTROL_REACHED_EXPECTED_STATE,
                 ProofResolution.UNREACHED, ProofResolutionReason.CONTROL_UNREACHED,
                 ProofResolution.TIMED_OUT, ProofResolutionReason.CONTROL_TIMED_OUT,
+                ProofResolution.AMBIGUOUS, ProofResolutionReason.CONTROL_MATCH_AMBIGUOUS,
                 ProofResolution.AMBIGUOUS,
                     ProofResolutionReason.CONTROL_CORRELATION_INVALIDATED,
                 ProofResolution.MISSING, ProofResolutionReason.CONTROL_SESSION_ENDED,
+                ProofResolution.FAILED, ProofResolutionReason.CONTROL_SELECTOR_FAILED,
                 ProofResolution.FAILED, ProofResolutionReason.CONTROL_FAILED),
             "Hold-control resolution and reason must agree"
         );
         boolean exactHold = exactSingle(provenance, Role.HOLD, descriptor.connectionId());
-        require(
-            resolution == ProofResolution.UNREACHED
-                ? provenance.isEmpty() || exactHold
-                : exactHold,
-            "Hold-control provenance must represent exactly its reachable hold progress"
-        );
+        if (reason == ProofResolutionReason.CONTROL_MATCH_AMBIGUOUS
+            || reason == ProofResolutionReason.CONTROL_SELECTOR_FAILED) {
+            require(
+                provenance.isEmpty(),
+                "A hold failure before REACHED_HELD cannot retain HOLD provenance"
+            );
+        } else {
+            require(
+                resolution == ProofResolution.UNREACHED
+                    ? provenance.isEmpty() || exactHold
+                    : exactHold,
+                "Hold-control provenance must represent exactly its reached hold progress"
+            );
+        }
     }
 
     private static void validateGuardControl(

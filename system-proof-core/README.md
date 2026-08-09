@@ -87,7 +87,9 @@ journal sequence, time, await order, or map iteration. Required observation rema
 for the whole evidence window, including sticky intermediate failure. Correlation remains owned by
 the existing subject registry, and causal relations remain owned by predecessor-guard facts.
 
-The terminal outcome has one linearization point. `PROVED` requires every item to be explicitly
+The terminal outcome has one linearization point. All typed facts emitted by one authoritative
+permit decision are applied as one bounded batch before the first terminal snapshot is frozen;
+independent later facts remain secondary. `PROVED` requires every item to be explicitly
 `SATISFIED`; an explicit guard counterexample yields `VIOLATED`; missing, ambiguous, unsupported,
 unreached, or timed-out coverage yields `INCONCLUSIVE`; trust loss yields `ERROR`. Later facts do
 not change the primary outcome. The deadline crosses the same control/observation/correlation
@@ -332,6 +334,10 @@ and unique, the hold fails with `CORRELATION_INVALIDATED`, requests `CLOSE_SESSI
 held byte, and completes release exceptionally. A publication after that point cannot revoke an
 already authorized release.
 
+A matching interaction is only `HELD_INTERACTION` after `REACHED_HELD`. Selector failure or overlap
+between active holds before reach emits no held reference: the control resolves with the exact
+pre-reach failure reason, hold evidence remains `MISSING`, and `reached()` completes exceptionally.
+
 Semantic predecessor guards use that same typed selector and the same coordinator synchronization
 boundary as holds. A guard is armed before stimulus with an exact subject, predecessor selector,
 `CONFIRMED` or `FORWARDED` boundary, successor selector, and positive maximum duration. `CONFIRMED`
@@ -346,6 +352,9 @@ tombstones. Cancellation, route failure, REQUIRED observation failure, write out
 share the same total order. A later cleanup failure cannot replace a violation and is retained only
 as a safe typed suppressed diagnostic. Missing or ambiguous native correlation does not select a
 guard, and exact subject/session validation isolates concurrent subjects and reconnects.
+An interaction processed while the guard is `ARMED` cannot establish both roles: if both selectors
+match it, the coordinator records an early-successor violation with successor-only provenance.
+Distinct predecessor and successor identities remain valid even on the same connection.
 
 The selector exposes typed codecs and matching but not `EvidenceSnapshot`; snapshot decoding,
 registry state, coordinator locks, and gateway permits remain internal. Guard journal events retain

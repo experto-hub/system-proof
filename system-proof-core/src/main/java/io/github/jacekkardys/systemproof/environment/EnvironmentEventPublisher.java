@@ -2,6 +2,7 @@ package io.github.jacekkardys.systemproof.environment;
 
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Supplier;
 import io.github.jacekkardys.systemproof.diagnostics.JournalRenderer;
 import io.github.jacekkardys.systemproof.journal.CheckpointEvent;
 import io.github.jacekkardys.systemproof.journal.CheckpointId;
@@ -322,6 +323,10 @@ final class EnvironmentEventPublisher {
             )),
             level
         );
+    }
+
+    <T> T proofFactBatch(Supplier<T> action) {
+        return proofFacts.factBatch(action);
     }
 
     void checkpoint(

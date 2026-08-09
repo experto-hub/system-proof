@@ -422,10 +422,17 @@ final class SemanticControlCoordinator
     @Override
     public ForwardingPermit permit(RecordedInteraction interaction) {
         interaction = Objects.requireNonNull(interaction, "interaction must not be null");
+        RecordedInteraction recorded = interaction;
         AfterTransition afterTransition = new AfterTransition();
         ForwardingPermit permit;
         synchronized (this) {
-            permit = decideLocked(interaction, afterTransition);
+            GuardSelections guardSelections = selectGuardsLocked(recorded);
+            HoldMatch holdMatch = guardSelections.closesSession
+                ? HoldMatch.none()
+                : selectHoldLocked(recorded);
+            permit = events.proofFactBatch(() ->
+                decideLocked(recorded, guardSelections, holdMatch, afterTransition)
+            );
         }
         runAfterTransition(afterTransition);
         return permit;
@@ -467,16 +474,16 @@ final class SemanticControlCoordinator
 
     private ForwardingPermit decideLocked(
         RecordedInteraction interaction,
+        GuardSelections guardSelections,
+        HoldMatch holdMatch,
         AfterTransition afterTransition
     ) {
-        List<GuardUse> forwardedPredecessors = observePredecessorsLocked(
+        GuardDecision guardDecision = commitGuardSelectionsLocked(
             interaction,
+            guardSelections,
             afterTransition
         );
-        GuardDecision guardDecision = decideGuardSuccessorsLocked(
-            interaction,
-            afterTransition
-        );
+        List<GuardUse> forwardedPredecessors = guardDecision.forwardedPredecessors;
         if (guardDecision.closeSession) {
             abortGuardUsesLocked(
                 forwardedPredecessors,
@@ -491,8 +498,10 @@ final class SemanticControlCoordinator
             return CLOSE_SESSION;
         }
 
-        HoldMatch holdMatch = selectHoldLocked(interaction, afterTransition);
         if (holdMatch.failedClosed) {
+            for (HoldEntry failed : holdMatch.failedEntries) {
+                failHoldLocked(failed, holdMatch.failure, afterTransition);
+            }
             abortGuardUsesLocked(
                 forwardedPredecessors,
                 SemanticPredecessorGuardFailure.SESSION_ABANDONED,
@@ -544,69 +553,68 @@ final class SemanticControlCoordinator
         return permit;
     }
 
-    private List<GuardUse> observePredecessorsLocked(
-        RecordedInteraction interaction,
-        AfterTransition afterTransition
-    ) {
-        List<GuardUse> forwardedPredecessors = new ArrayList<>();
+    private GuardSelections selectGuardsLocked(RecordedInteraction interaction) {
+        List<GuardInteractionSelection> selections = new ArrayList<>();
+        boolean closeSession = false;
         for (GuardEntry entry : guards.values()) {
-            if (entry.state != SemanticPredecessorGuardState.ARMED) {
-                continue;
-            }
-            if (!entry.evidenceWindow.test(interaction.interactionRef())) {
-                continue;
-            }
-            SelectorSelection selection;
-            try {
-                selection = select(entry.predecessorSelector, interaction);
-            } catch (RuntimeException | Error failure) {
-                failGuardLocked(
-                    entry,
-                    SemanticPredecessorGuardFailure.SELECTOR_EVALUATION,
-                    afterTransition
-                );
-                continue;
-            }
-            if (selection == null) {
-                continue;
-            }
-            entry.predecessor = interaction.interactionRef();
-            entry.predecessorSelection = selection;
-            if (entry.requiredBoundary == SemanticPredecessorBoundary.CONFIRMED) {
-                transitionGuardLocked(
-                    entry,
-                    SemanticPredecessorGuardState.PREDECESSOR_SATISFIED,
-                    Optional.empty()
-                );
-            } else {
-                transitionGuardLocked(
-                    entry,
-                    SemanticPredecessorGuardState.PREDECESSOR_OBSERVED,
-                    Optional.empty()
-                );
-                forwardedPredecessors.add(new GuardUse(entry, selection));
-            }
-        }
-        return forwardedPredecessors;
-    }
-
-    private GuardDecision decideGuardSuccessorsLocked(
-        RecordedInteraction interaction,
-        AfterTransition afterTransition
-    ) {
-        List<GuardUse> authorized = new ArrayList<>();
-        boolean close = false;
-        for (GuardEntry entry : guards.values()) {
+            SemanticPredecessorGuardState stateBeforeInteraction = entry.state;
             if (!guardEnforcesLaterTarget(entry)) {
                 continue;
             }
             if (!entry.evidenceWindow.test(interaction.interactionRef())) {
                 continue;
             }
-            SelectorSelection selection;
+            SelectorSelection predecessor = null;
+            boolean predecessorFailed = false;
+            if (stateBeforeInteraction == SemanticPredecessorGuardState.ARMED) {
+                try {
+                    predecessor = select(entry.predecessorSelector, interaction);
+                } catch (RuntimeException | Error failure) {
+                    predecessorFailed = true;
+                }
+            }
+            SelectorSelection successor = null;
+            boolean successorFailed = false;
             try {
-                selection = select(entry.successorSelector, interaction);
+                successor = select(entry.successorSelector, interaction);
             } catch (RuntimeException | Error failure) {
+                successorFailed = true;
+            }
+            GuardInteractionSelection selection = new GuardInteractionSelection(
+                entry,
+                stateBeforeInteraction,
+                predecessor,
+                predecessorFailed,
+                successor,
+                successorFailed
+            );
+            selections.add(selection);
+            closeSession |= selection.closesSession(interaction.interactionRef());
+        }
+        return new GuardSelections(List.copyOf(selections), closeSession);
+    }
+
+    private GuardDecision commitGuardSelectionsLocked(
+        RecordedInteraction interaction,
+        GuardSelections guardSelections,
+        AfterTransition afterTransition
+    ) {
+        List<GuardUse> forwardedPredecessors = new ArrayList<>();
+        List<GuardUse> authorized = new ArrayList<>();
+        boolean close = false;
+        for (GuardInteractionSelection selection : guardSelections.selections) {
+            if (!selection.predecessorFailed) {
+                continue;
+            }
+            failGuardLocked(
+                selection.entry,
+                SemanticPredecessorGuardFailure.SELECTOR_EVALUATION,
+                afterTransition
+            );
+        }
+        for (GuardInteractionSelection interactionSelection : guardSelections.selections) {
+            GuardEntry entry = interactionSelection.entry;
+            if (interactionSelection.successorFailed) {
                 if (guardAwaitsTimedBoundary(entry.state)) {
                     failGuardLocked(
                         entry,
@@ -617,13 +625,40 @@ final class SemanticControlCoordinator
                 close = true;
                 continue;
             }
+            SelectorSelection selection = interactionSelection.successor;
             if (selection == null) {
+                continue;
+            }
+            if (!interactionSelection.predecessorFailed
+                && interactionSelection.stateBeforeInteraction
+                    == SemanticPredecessorGuardState.ARMED) {
+                entry.successor = interaction.interactionRef();
+                entry.successorSelection = selection;
+                terminalGuardLocked(
+                    entry,
+                    SemanticPredecessorGuardState.VIOLATED,
+                    Optional.empty(),
+                    afterTransition
+                );
+                close = true;
                 continue;
             }
             entry.successor = interaction.interactionRef();
             entry.successorSelection = selection;
             switch (entry.state) {
                 case PREDECESSOR_SATISFIED -> {
+                    if (interaction.interactionRef().equals(entry.predecessor)) {
+                        entry.predecessor = null;
+                        entry.predecessorSelection = null;
+                        terminalGuardLocked(
+                            entry,
+                            SemanticPredecessorGuardState.VIOLATED,
+                            Optional.empty(),
+                            afterTransition
+                        );
+                        close = true;
+                        continue;
+                    }
                     transitionGuardLocked(
                         entry,
                         SemanticPredecessorGuardState.SUCCESSOR_AUTHORIZED,
@@ -651,12 +686,35 @@ final class SemanticControlCoordinator
                 );
             }
         }
-        return new GuardDecision(close, authorized);
+        for (GuardInteractionSelection selection : guardSelections.selections) {
+            GuardEntry entry = selection.entry;
+            if (selection.predecessor == null
+                || selection.predecessorFailed
+                || entry.state != SemanticPredecessorGuardState.ARMED) {
+                continue;
+            }
+            entry.predecessor = interaction.interactionRef();
+            entry.predecessorSelection = selection.predecessor;
+            if (entry.requiredBoundary == SemanticPredecessorBoundary.CONFIRMED) {
+                transitionGuardLocked(
+                    entry,
+                    SemanticPredecessorGuardState.PREDECESSOR_SATISFIED,
+                    Optional.empty()
+                );
+            } else {
+                transitionGuardLocked(
+                    entry,
+                    SemanticPredecessorGuardState.PREDECESSOR_OBSERVED,
+                    Optional.empty()
+                );
+                forwardedPredecessors.add(new GuardUse(entry, selection.predecessor));
+            }
+        }
+        return new GuardDecision(close, forwardedPredecessors, authorized);
     }
 
     private HoldMatch selectHoldLocked(
-        RecordedInteraction interaction,
-        AfterTransition afterTransition
+        RecordedInteraction interaction
     ) {
         List<HoldSelection> matches = new ArrayList<>();
         for (HoldEntry entry : activeHolds.values()) {
@@ -670,34 +728,32 @@ final class SemanticControlCoordinator
             try {
                 selection = select(entry.selector, interaction);
             } catch (RuntimeException | Error failure) {
-                entry.interactionRef = interaction.interactionRef();
-                failHoldLocked(
-                    entry,
-                    SemanticHoldFailure.SELECTOR_EVALUATION,
-                    afterTransition
+                return HoldMatch.failed(
+                    List.of(entry),
+                    SemanticHoldFailure.SELECTOR_EVALUATION
                 );
-                return HoldMatch.failed();
             }
             if (selection != null) {
                 matches.add(new HoldSelection(entry, selection));
             }
         }
         if (matches.size() > 1) {
-            for (HoldSelection match : matches) {
-                match.entry.interactionRef = interaction.interactionRef();
-                failHoldLocked(
-                    match.entry,
-                    SemanticHoldFailure.AMBIGUOUS_MATCH,
-                    afterTransition
-                );
-            }
-            return HoldMatch.failed();
+            return HoldMatch.failed(
+                matches.stream().map(HoldSelection::entry).toList(),
+                SemanticHoldFailure.AMBIGUOUS_MATCH
+            );
         }
         if (matches.isEmpty()) {
             return HoldMatch.none();
         }
         HoldSelection selected = matches.getFirst();
-        return new HoldMatch(selected.entry, selected.selection, false);
+        return new HoldMatch(
+            selected.entry,
+            selected.selection,
+            false,
+            List.of(),
+            null
+        );
     }
 
     private void reachHoldLocked(
@@ -1828,17 +1884,54 @@ final class SemanticControlCoordinator
 
     private record HoldSelection(HoldEntry entry, SelectorSelection selection) {}
 
+    private record GuardInteractionSelection(
+        GuardEntry entry,
+        SemanticPredecessorGuardState stateBeforeInteraction,
+        SelectorSelection predecessor,
+        boolean predecessorFailed,
+        SelectorSelection successor,
+        boolean successorFailed
+    ) {
+        private boolean closesSession(InteractionRef interaction) {
+            if (successorFailed) {
+                return true;
+            }
+            if (successor == null) {
+                return false;
+            }
+            if (predecessorFailed) {
+                return true;
+            }
+            return switch (stateBeforeInteraction) {
+                case PREDECESSOR_SATISFIED -> interaction.equals(entry.predecessor);
+                case SUCCESSOR_AUTHORIZED, SATISFIED, DECLARED -> false;
+                case ARMED, PREDECESSOR_OBSERVED, VIOLATED, CANCELLED, TIMED_OUT, FAILED ->
+                    true;
+            };
+        }
+    }
+
+    private record GuardSelections(
+        List<GuardInteractionSelection> selections,
+        boolean closesSession
+    ) {}
+
     private record HoldMatch(
         HoldEntry entry,
         SelectorSelection selection,
-        boolean failedClosed
+        boolean failedClosed,
+        List<HoldEntry> failedEntries,
+        SemanticHoldFailure failure
     ) {
         private static HoldMatch none() {
-            return new HoldMatch(null, null, false);
+            return new HoldMatch(null, null, false, List.of(), null);
         }
 
-        private static HoldMatch failed() {
-            return new HoldMatch(null, null, true);
+        private static HoldMatch failed(
+            List<HoldEntry> entries,
+            SemanticHoldFailure failure
+        ) {
+            return new HoldMatch(null, null, true, List.copyOf(entries), failure);
         }
     }
 
@@ -1846,6 +1939,7 @@ final class SemanticControlCoordinator
 
     private record GuardDecision(
         boolean closeSession,
+        List<GuardUse> forwardedPredecessors,
         List<GuardUse> authorizedSuccessors
     ) {}
 

@@ -426,7 +426,9 @@ class CoreArchitectureTest {
         proof.ProofResolutionReason#CAUSAL_RELATION_VIOLATED:proof.ProofResolutionReason
         proof.ProofResolutionReason#CONTROL_CORRELATION_INVALIDATED:proof.ProofResolutionReason
         proof.ProofResolutionReason#CONTROL_FAILED:proof.ProofResolutionReason
+        proof.ProofResolutionReason#CONTROL_MATCH_AMBIGUOUS:proof.ProofResolutionReason
         proof.ProofResolutionReason#CONTROL_REACHED_EXPECTED_STATE:proof.ProofResolutionReason
+        proof.ProofResolutionReason#CONTROL_SELECTOR_FAILED:proof.ProofResolutionReason
         proof.ProofResolutionReason#CONTROL_SESSION_ENDED:proof.ProofResolutionReason
         proof.ProofResolutionReason#CONTROL_TIMED_OUT:proof.ProofResolutionReason
         proof.ProofResolutionReason#CONTROL_UNREACHED:proof.ProofResolutionReason

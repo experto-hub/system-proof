@@ -179,6 +179,18 @@ class ProofInteractionProvenanceTest {
                 ProofResolutionReason.CONTROL_FAILED,
                 List.of(ProofInteractionProvenance.hold(held))
             ).interactions()).containsExactly(held);
+            assertThat(holdResolution(
+                descriptor,
+                ProofResolution.AMBIGUOUS,
+                ProofResolutionReason.CONTROL_MATCH_AMBIGUOUS,
+                List.of()
+            ).provenance()).isEmpty();
+            assertThat(holdResolution(
+                descriptor,
+                ProofResolution.FAILED,
+                ProofResolutionReason.CONTROL_SELECTOR_FAILED,
+                List.of()
+            ).provenance()).isEmpty();
 
             assertThatThrownBy(() -> holdResolution(
                 descriptor,
@@ -206,6 +218,30 @@ class ProofInteractionProvenanceTest {
                     ProofInteractionProvenance.hold(held),
                     ProofInteractionProvenance.hold(other)
                 )
+            )).isInstanceOf(IllegalArgumentException.class);
+            assertThatThrownBy(() -> holdResolution(
+                descriptor,
+                ProofResolution.AMBIGUOUS,
+                ProofResolutionReason.CONTROL_MATCH_AMBIGUOUS,
+                List.of(ProofInteractionProvenance.hold(held))
+            )).isInstanceOf(IllegalArgumentException.class);
+            assertThatThrownBy(() -> holdResolution(
+                descriptor,
+                ProofResolution.FAILED,
+                ProofResolutionReason.CONTROL_SELECTOR_FAILED,
+                List.of(ProofInteractionProvenance.hold(held))
+            )).isInstanceOf(IllegalArgumentException.class);
+            assertThatThrownBy(() -> holdResolution(
+                descriptor,
+                ProofResolution.AMBIGUOUS,
+                ProofResolutionReason.CONTROL_CORRELATION_INVALIDATED,
+                List.of()
+            )).isInstanceOf(IllegalArgumentException.class);
+            assertThatThrownBy(() -> holdResolution(
+                descriptor,
+                ProofResolution.FAILED,
+                ProofResolutionReason.CONTROL_FAILED,
+                List.of()
             )).isInstanceOf(IllegalArgumentException.class);
         }
     }

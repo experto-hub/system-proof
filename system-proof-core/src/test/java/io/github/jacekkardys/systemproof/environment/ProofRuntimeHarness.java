@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 import io.github.jacekkardys.systemproof.control.SemanticInteractionSelector;
 import io.github.jacekkardys.systemproof.control.SemanticHold;
 import io.github.jacekkardys.systemproof.control.SemanticPredecessorGuard;
@@ -26,6 +27,7 @@ final class ProofRuntimeHarness implements AutoCloseable {
     final ProofSubjectRegistry proofSubjects;
     final SemanticControlCoordinator controls;
     final EnvironmentEventPublisher events;
+    final ScenarioJournal journal;
     final RuntimeConnectionRegistry connections;
     final EnvironmentExecution execution;
     final ProofTestFixture.RouteProvider route;
@@ -82,7 +84,7 @@ final class ProofRuntimeHarness implements AutoCloseable {
             List.of(ConnectionFactory.create(client.api, server.api))
         );
         EnvironmentLogging logging = EnvironmentLogging.defaults();
-        ScenarioJournal journal = ScenarioJournal.withoutDiagnosticTime();
+        journal = ScenarioJournal.withoutDiagnosticTime();
         JournalRenderer renderer = new JournalRenderer();
         BoundaryHooks hooks = boundaryHooks;
         ProofFactObserver observedFacts = new ProofFactObserver() {
@@ -90,6 +92,11 @@ final class ProofRuntimeHarness implements AutoCloseable {
             public void fact(io.github.jacekkardys.systemproof.journal.ScenarioEvent event) {
                 hooks.beforeProofFact(event);
                 proofs.fact(event);
+            }
+
+            @Override
+            public <T> T factBatch(java.util.function.Supplier<T> action) {
+                return proofs.factBatch(action);
             }
 
             @Override
@@ -295,8 +302,34 @@ final class ProofRuntimeHarness implements AutoCloseable {
         ));
     }
 
+    SemanticPredecessorGuard declareGuard(
+        io.github.jacekkardys.systemproof.control.SemanticPredecessorBoundary boundary,
+        Predicate<String> predecessor,
+        Predicate<String> successor
+    ) {
+        io.github.jacekkardys.systemproof.control.SemanticPredecessorRequirement requirement =
+            switch (boundary) {
+                case CONFIRMED ->
+                    io.github.jacekkardys.systemproof.control.SemanticPredecessorRequirement
+                        .confirmed(selector(predecessor));
+                case FORWARDED ->
+                    io.github.jacekkardys.systemproof.control.SemanticPredecessorRequirement
+                        .forwarded(selector(predecessor));
+            };
+        return controls.declareGuard(SemanticPredecessorGuardSpec.requiring(
+            subject,
+            requirement,
+            selector(successor),
+            Duration.ofSeconds(30)
+        ));
+    }
+
     SemanticHold declareHold(String expected) {
         return controls.declareHold(selector(expected), Duration.ofSeconds(30));
+    }
+
+    SemanticHold declareHold(Predicate<String> predicate) {
+        return controls.declareHold(selector(predicate), Duration.ofSeconds(30));
     }
 
     ProofExecution activate(ProofPlan plan) {
@@ -415,11 +448,15 @@ final class ProofRuntimeHarness implements AutoCloseable {
     }
 
     private SemanticInteractionSelector<String> selector(String expected) {
+        return selector(expected::equals);
+    }
+
+    private SemanticInteractionSelector<String> selector(Predicate<String> predicate) {
         return SemanticInteractionSelector.matching(
             connectionId,
             FlowDirection.CONSUMER_TO_PROVIDER,
             ProofTestFixture.TextCodec.INSTANCE,
-            expected::equals
+            predicate
         ).forSubject(subject);
     }
 
