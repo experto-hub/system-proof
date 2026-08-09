@@ -2,6 +2,8 @@ package io.github.jacekkardys.systemproof.environment;
 
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
 import io.github.jacekkardys.systemproof.diagnostics.JournalRenderer;
 import io.github.jacekkardys.systemproof.journal.CheckpointEvent;
 import io.github.jacekkardys.systemproof.journal.CheckpointId;
@@ -48,10 +50,16 @@ import io.github.jacekkardys.systemproof.observation.EvidenceSchemaId;
 import io.github.jacekkardys.systemproof.observation.FlowDirection;
 import io.github.jacekkardys.systemproof.topology.ConnectionId;
 
-/** Builds and publishes framework-owned facts through the single environment journal. */
+/**
+ * Builds and publishes framework-owned facts through the single environment journal.
+ * Proof-critical publication commits journal storage, matching runtime state, and the typed proof
+ * fact before attempting non-authoritative best-effort diagnostic emission. Non-fatal append
+ * failures enter the proof journal-failure path; fatal JVM failures bypass it and propagate.
+ */
 final class EnvironmentEventPublisher {
     private final ScenarioJournal journal;
     private final JournalSlf4jEmitter emitter;
+    private final ProofFactObserver proofFacts;
 
     EnvironmentEventPublisher(
         ScenarioJournal journal,
@@ -59,7 +67,8 @@ final class EnvironmentEventPublisher {
     ) {
         this(
             journal,
-            new JournalSlf4jEmitter(logging, new JournalRenderer())
+            new JournalSlf4jEmitter(logging, new JournalRenderer()),
+            ProofFactObserver.NONE
         );
     }
 
@@ -67,8 +76,17 @@ final class EnvironmentEventPublisher {
         ScenarioJournal journal,
         JournalSlf4jEmitter emitter
     ) {
+        this(journal, emitter, ProofFactObserver.NONE);
+    }
+
+    EnvironmentEventPublisher(
+        ScenarioJournal journal,
+        JournalSlf4jEmitter emitter,
+        ProofFactObserver proofFacts
+    ) {
         this.journal = Objects.requireNonNull(journal, "journal must not be null");
         this.emitter = Objects.requireNonNull(emitter, "emitter must not be null");
+        this.proofFacts = Objects.requireNonNull(proofFacts, "proofFacts must not be null");
     }
 
     void environmentLifecycle(EnvironmentState state) {
@@ -212,22 +230,25 @@ final class EnvironmentEventPublisher {
         );
     }
 
-    void proofSubjectCreated(ProofSubjectRef proofSubject) {
-        emitter.framework(
-            append(new ProofSubjectCreatedEvent(proofSubject)),
-            LogLevel.INFO
+    void proofSubjectCreated(ProofSubjectRef proofSubject, Runnable stateCommit) {
+        JournalEntry entry = commitProofCritical(
+            new ProofSubjectCreatedEvent(proofSubject),
+            stateCommit
         );
+        emitFrameworkBestEffort(entry, LogLevel.INFO);
     }
 
     void proofSubjectArmed(
         ProofSubjectRef proofSubject,
         CorrelationKey key,
-        boolean sharedKey
+        boolean sharedKey,
+        Runnable stateCommit
     ) {
-        emitter.framework(
-            append(new ProofSubjectArmedEvent(proofSubject, key, sharedKey)),
-            LogLevel.INFO
+        JournalEntry entry = commitProofCritical(
+            new ProofSubjectArmedEvent(proofSubject, key, sharedKey),
+            stateCommit
         );
+        emitFrameworkBestEffort(entry, LogLevel.INFO);
     }
 
     void correlationCandidate(
@@ -235,16 +256,21 @@ final class EnvironmentEventPublisher {
         CorrelationKey key,
         InteractionRef interactionRef,
         EvidenceSnapshot nativeReference,
-        CorrelationCardinality cardinality
+        CorrelationCardinality cardinality,
+        Runnable stateCommit
     ) {
-        emitter.framework(
-            append(new CorrelationCandidateEvent(
+        JournalEntry entry = commitProofCritical(
+            new CorrelationCandidateEvent(
                 proofSubject,
                 key,
                 interactionRef,
                 nativeReference,
                 cardinality
-            )),
+            ),
+            stateCommit
+        );
+        emitFrameworkBestEffort(
+            entry,
             cardinality == CorrelationCardinality.AMBIGUOUS
                 ? LogLevel.WARN
                 : LogLevel.INFO
@@ -259,13 +285,14 @@ final class EnvironmentEventPublisher {
         EvidenceSchemaId evidenceSchema,
         Optional<ProofSubjectRef> proofSubject,
         Optional<InteractionRef> interactionRef,
-        Optional<SemanticHoldFailure> failure
+        Optional<SemanticHoldFailure> failure,
+        Runnable stateCommit
     ) {
         LogLevel level = state == SemanticHoldState.FAILED
             ? LogLevel.WARN
             : LogLevel.INFO;
-        emitter.framework(
-            append(new SemanticHoldEvent(
+        JournalEntry entry = commitProofCritical(
+            new SemanticHoldEvent(
                 holdRef,
                 state,
                 connectionId,
@@ -274,9 +301,10 @@ final class EnvironmentEventPublisher {
                 proofSubject,
                 interactionRef,
                 failure
-            )),
-            level
+            ),
+            stateCommit
         );
+        emitFrameworkBestEffort(entry, level);
     }
 
     void semanticPredecessorGuard(
@@ -289,15 +317,16 @@ final class EnvironmentEventPublisher {
         Optional<InteractionRef> successor,
         Optional<ForwardingDecision> decision,
         Optional<SemanticPredecessorViolation> violation,
-        Optional<SemanticPredecessorGuardFailure> failure
+        Optional<SemanticPredecessorGuardFailure> failure,
+        Runnable stateCommit
     ) {
         LogLevel level = state == SemanticPredecessorGuardState.VIOLATED
             || state == SemanticPredecessorGuardState.FAILED
             || kind == SemanticPredecessorGuardEvent.Kind.VIOLATION
                 ? LogLevel.WARN
                 : LogLevel.INFO;
-        emitter.framework(
-            append(new SemanticPredecessorGuardEvent(
+        JournalEntry entry = commitProofCritical(
+            new SemanticPredecessorGuardEvent(
                 guardRef,
                 kind,
                 proofSubject,
@@ -308,9 +337,21 @@ final class EnvironmentEventPublisher {
                 decision,
                 violation,
                 failure
-            )),
-            level
+            ),
+            stateCommit
         );
+        emitFrameworkBestEffort(entry, level);
+    }
+
+    <T> T proofFactBatch(Supplier<T> action) {
+        return proofFacts.factBatch(action);
+    }
+
+    <T> T proofFactBatch(
+        Supplier<T> action,
+        Consumer<ProofFactObserver.FinalizationHandoff> handoffConsumer
+    ) {
+        return proofFacts.factBatch(action, handoffConsumer);
     }
 
     void checkpoint(
@@ -344,6 +385,42 @@ final class EnvironmentEventPublisher {
     }
 
     private JournalEntry append(ScenarioEvent event) {
-        return journal.append(event);
+        JournalEntry entry;
+        try {
+            entry = journal.append(event);
+        } catch (RuntimeException | Error failure) {
+            ProofFactObserver.rethrowFatalJvmFailure(failure);
+            proofFacts.journalFailure(failure);
+            throw failure;
+        }
+        proofFacts.fact(event);
+        return entry;
+    }
+
+    /**
+     * Stores one proof-critical event before committing its matching current-state mutation and
+     * proof fact. Diagnostic rendering is deliberately outside that authoritative boundary.
+     */
+    private JournalEntry commitProofCritical(ScenarioEvent event, Runnable stateCommit) {
+        JournalEntry entry;
+        try {
+            entry = journal.append(event);
+        } catch (RuntimeException | Error failure) {
+            ProofFactObserver.rethrowFatalJvmFailure(failure);
+            proofFacts.journalFailure(failure);
+            throw failure;
+        }
+        Objects.requireNonNull(stateCommit, "stateCommit must not be null").run();
+        proofFacts.fact(event);
+        return entry;
+    }
+
+    private void emitFrameworkBestEffort(JournalEntry entry, LogLevel level) {
+        try {
+            emitter.framework(entry, level);
+        } catch (RuntimeException | Error failure) {
+            ProofFactObserver.rethrowFatalJvmFailure(failure);
+            // Stored proof facts and current state are authoritative; diagnostics are not.
+        }
     }
 }

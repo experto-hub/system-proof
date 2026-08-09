@@ -11,7 +11,10 @@ import io.github.jacekkardys.systemproof.observation.ForwardingDecision;
 import io.github.jacekkardys.systemproof.observation.InteractionRef;
 import io.github.jacekkardys.systemproof.proof.ProofSubjectRef;
 
-/** Immutable, protocol-neutral, secret-safe fact for one predecessor guard. */
+/**
+ * Immutable, protocol-neutral, secret-safe fact for one predecessor guard. When both roles are
+ * present, predecessor and successor must identify distinct interactions.
+ */
 public record SemanticPredecessorGuardEvent(
     SemanticPredecessorGuardRef guardRef,
     Kind kind,
@@ -41,6 +44,11 @@ public record SemanticPredecessorGuardEvent(
         decision = Objects.requireNonNull(decision, "decision must not be null");
         violation = Objects.requireNonNull(violation, "violation must not be null");
         failure = Objects.requireNonNull(failure, "failure must not be null");
+        if (predecessor.isPresent() && predecessor.equals(successor)) {
+            throw new IllegalArgumentException(
+                "A predecessor guard cannot use one interaction for both roles"
+            );
+        }
         validate(kind, state, predecessor, successor, decision, violation, failure);
     }
 
@@ -121,6 +129,29 @@ public record SemanticPredecessorGuardEvent(
                     );
                 }
             }
+            case TERMINAL -> {
+                if (state == SemanticPredecessorGuardState.SATISFIED) {
+                    if (predecessor.isEmpty() || successor.isEmpty()
+                        || decision.isPresent() || violation.isPresent()
+                        || failure.isPresent()) {
+                        throw new IllegalArgumentException(
+                            "A satisfied terminal guard fact requires the exact predecessor and successor"
+                        );
+                    }
+                } else if (state == SemanticPredecessorGuardState.VIOLATED) {
+                    if (successor.isEmpty()
+                        || decision.filter(ForwardingDecision.CLOSE_SESSION::equals).isEmpty()
+                        || violation.isEmpty() || failure.isPresent()) {
+                        throw new IllegalArgumentException(
+                            "A violated terminal guard fact requires the rejected exact successor"
+                        );
+                    }
+                } else {
+                    throw new IllegalArgumentException(
+                        "A terminal guard fact is supported only for SATISFIED or VIOLATED state"
+                    );
+                }
+            }
         }
     }
 
@@ -129,6 +160,7 @@ public record SemanticPredecessorGuardEvent(
         DECISION,
         RELATION,
         VIOLATION,
-        SUPPRESSED_FAILURE
+        SUPPRESSED_FAILURE,
+        TERMINAL
     }
 }

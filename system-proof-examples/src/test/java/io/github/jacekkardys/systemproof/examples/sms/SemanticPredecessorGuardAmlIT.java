@@ -400,7 +400,8 @@ final class SemanticPredecessorGuardAmlIT {
         GuardPair guards
     ) {
         return guardEvents(environment).stream()
-            .filter(event -> event.kind() == SemanticPredecessorGuardEvent.Kind.RELATION)
+            .filter(event -> event.kind() == SemanticPredecessorGuardEvent.Kind.TERMINAL
+                && event.state() == SemanticPredecessorGuardState.SATISFIED)
             .filter(event -> event.guardRef().equals(guards.postgresqlToHttp().ref())
                 || event.guardRef().equals(guards.httpToSmpp().ref()))
             .toList();
@@ -411,7 +412,8 @@ final class SemanticPredecessorGuardAmlIT {
         SemanticPredecessorGuard guard
     ) {
         return guardEvents(environment).stream()
-            .filter(event -> event.kind() == SemanticPredecessorGuardEvent.Kind.VIOLATION)
+            .filter(event -> event.kind() == SemanticPredecessorGuardEvent.Kind.TERMINAL
+                && event.state() == SemanticPredecessorGuardState.VIOLATED)
             .filter(event -> event.guardRef().equals(guard.ref()))
             .toList();
     }

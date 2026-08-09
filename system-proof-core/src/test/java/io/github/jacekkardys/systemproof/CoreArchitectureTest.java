@@ -88,7 +88,13 @@ class CoreArchitectureTest {
         environment.EnvironmentStartException
         environment.EnvironmentTopology
         journal.LogLevel
+        proof.ProofConfigurationException
+        proof.ProofExecution
+        proof.ProofPlan
+        proof.ProofPlan$Builder
+        proof.ProofPrerequisite
         proof.ProofSubjects
+        proof.Proofs
         topology.Connection
         topology.Contract
         topology.DeclaredInteraction
@@ -208,6 +214,44 @@ class CoreArchitectureTest {
         proof.CorrelationResult$Ambiguous
         proof.CorrelationResult$Missing
         proof.CorrelationResult$Unique
+        proof.ProofDiagnostic
+        proof.ProofEvaluationResolution
+        proof.ProofEvaluationState
+        proof.ProofEvidenceKind
+        proof.ProofExecutionState
+        proof.ProofFailureStage
+        proof.ProofInteractionProvenance
+        proof.ProofInteractionProvenance$Role
+        proof.ProofObligationId
+        proof.ProofObligationResolution
+        proof.ProofOutcome
+        proof.ProofPlan$CausalRelation
+        proof.ProofPlan$Correlation
+        proof.ProofPlan$GuardControl
+        proof.ProofPlan$GuardEvidence
+        proof.ProofPlan$HoldControl
+        proof.ProofPlan$HoldEvidence
+        proof.ProofPlan$Observation
+        proof.ProofPlan$Prerequisite
+        proof.ProofPlan$Requirement
+        proof.ProofPlanId
+        proof.ProofPrerequisiteStatus
+        proof.ProofReport
+        proof.ProofRequirementDescriptor
+        proof.ProofRequirementDescriptor$CausalRelation
+        proof.ProofRequirementDescriptor$Correlation
+        proof.ProofRequirementDescriptor$GuardControl
+        proof.ProofRequirementDescriptor$GuardEvidence
+        proof.ProofRequirementDescriptor$HoldControl
+        proof.ProofRequirementDescriptor$HoldEvidence
+        proof.ProofRequirementDescriptor$Observation
+        proof.ProofRequirementDescriptor$Prerequisite
+        proof.ProofRequirementKind
+        proof.ProofResolution
+        proof.ProofResolutionReason
+        proof.ProofResult
+        proof.ProofStimulusResolution
+        proof.ProofStimulusState
         proof.ProofSubjectRef
         topology.CompatibilityResult
         topology.ConnectionDescriptor
@@ -239,6 +283,7 @@ class CoreArchitectureTest {
         control.SemanticHoldFailure#WRITE_FAILURE:control.SemanticHoldFailure
         control.SemanticHoldState#ARMED:control.SemanticHoldState
         control.SemanticHoldState#CANCELLED:control.SemanticHoldState
+        control.SemanticHoldState#DECLARED:control.SemanticHoldState
         control.SemanticHoldState#FAILED:control.SemanticHoldState
         control.SemanticHoldState#FORWARDED:control.SemanticHoldState
         control.SemanticHoldState#REACHED_HELD:control.SemanticHoldState
@@ -254,6 +299,7 @@ class CoreArchitectureTest {
         control.SemanticPredecessorGuardFailure#WRITE_FAILURE:control.SemanticPredecessorGuardFailure
         control.SemanticPredecessorGuardState#ARMED:control.SemanticPredecessorGuardState
         control.SemanticPredecessorGuardState#CANCELLED:control.SemanticPredecessorGuardState
+        control.SemanticPredecessorGuardState#DECLARED:control.SemanticPredecessorGuardState
         control.SemanticPredecessorGuardState#FAILED:control.SemanticPredecessorGuardState
         control.SemanticPredecessorGuardState#PREDECESSOR_OBSERVED:control.SemanticPredecessorGuardState
         control.SemanticPredecessorGuardState#PREDECESSOR_SATISFIED:control.SemanticPredecessorGuardState
@@ -305,6 +351,7 @@ class CoreArchitectureTest {
         journal.SemanticPredecessorGuardEvent$Kind#RELATION:journal.SemanticPredecessorGuardEvent$Kind
         journal.SemanticPredecessorGuardEvent$Kind#STATE:journal.SemanticPredecessorGuardEvent$Kind
         journal.SemanticPredecessorGuardEvent$Kind#SUPPRESSED_FAILURE:journal.SemanticPredecessorGuardEvent$Kind
+        journal.SemanticPredecessorGuardEvent$Kind#TERMINAL:journal.SemanticPredecessorGuardEvent$Kind
         journal.SemanticPredecessorGuardEvent$Kind#VIOLATION:journal.SemanticPredecessorGuardEvent$Kind
         observation.EffectiveObservationStatus#ACTIVE:observation.EffectiveObservationStatus
         observation.EffectiveObservationStatus#DEGRADED:observation.EffectiveObservationStatus
@@ -325,6 +372,90 @@ class CoreArchitectureTest {
         proof.CorrelationCardinality#AMBIGUOUS:proof.CorrelationCardinality
         proof.CorrelationCardinality#MISSING:proof.CorrelationCardinality
         proof.CorrelationCardinality#UNIQUE:proof.CorrelationCardinality
+        proof.ProofEvaluationState#COMPLETED:proof.ProofEvaluationState
+        proof.ProofEvaluationState#FAILED:proof.ProofEvaluationState
+        proof.ProofEvaluationState#NOT_STARTED:proof.ProofEvaluationState
+        proof.ProofEvaluationState#RUNNING:proof.ProofEvaluationState
+        proof.ProofEvidenceKind#HELD_INTERACTION:proof.ProofEvidenceKind
+        proof.ProofEvidenceKind#PREDECESSOR_INTERACTION:proof.ProofEvidenceKind
+        proof.ProofEvidenceKind#SUCCESSOR_INTERACTION:proof.ProofEvidenceKind
+        proof.ProofExecutionState#ACTIVATING:proof.ProofExecutionState
+        proof.ProofExecutionState#ACTIVE:proof.ProofExecutionState
+        proof.ProofExecutionState#COMPLETED:proof.ProofExecutionState
+        proof.ProofExecutionState#DRAFT:proof.ProofExecutionState
+        proof.ProofExecutionState#EVALUATING:proof.ProofExecutionState
+        proof.ProofFailureStage#ACTIVATION:proof.ProofFailureStage
+        proof.ProofFailureStage#CLEANUP:proof.ProofFailureStage
+        proof.ProofFailureStage#CONTROL:proof.ProofFailureStage
+        proof.ProofFailureStage#CORRELATION:proof.ProofFailureStage
+        proof.ProofFailureStage#EVALUATION:proof.ProofFailureStage
+        proof.ProofFailureStage#GATEWAY:proof.ProofFailureStage
+        proof.ProofFailureStage#JOURNAL:proof.ProofFailureStage
+        proof.ProofFailureStage#OBSERVATION:proof.ProofFailureStage
+        proof.ProofFailureStage#STIMULUS:proof.ProofFailureStage
+        proof.ProofFailureStage#TEARDOWN:proof.ProofFailureStage
+        proof.ProofInteractionProvenance$Role#CORRELATION:proof.ProofInteractionProvenance$Role
+        proof.ProofInteractionProvenance$Role#HOLD:proof.ProofInteractionProvenance$Role
+        proof.ProofInteractionProvenance$Role#PREDECESSOR:proof.ProofInteractionProvenance$Role
+        proof.ProofInteractionProvenance$Role#SUCCESSOR:proof.ProofInteractionProvenance$Role
+        proof.ProofOutcome#ERROR:proof.ProofOutcome
+        proof.ProofOutcome#INCONCLUSIVE:proof.ProofOutcome
+        proof.ProofOutcome#PROVED:proof.ProofOutcome
+        proof.ProofOutcome#VIOLATED:proof.ProofOutcome
+        proof.ProofPrerequisiteStatus#FAILED:proof.ProofPrerequisiteStatus
+        proof.ProofPrerequisiteStatus#SATISFIED:proof.ProofPrerequisiteStatus
+        proof.ProofPrerequisiteStatus#UNSUPPORTED:proof.ProofPrerequisiteStatus
+        proof.ProofRequirementKind#CAUSAL_RELATION:proof.ProofRequirementKind
+        proof.ProofRequirementKind#CONTROL:proof.ProofRequirementKind
+        proof.ProofRequirementKind#CORRELATION:proof.ProofRequirementKind
+        proof.ProofRequirementKind#EVIDENCE:proof.ProofRequirementKind
+        proof.ProofRequirementKind#OBSERVATION:proof.ProofRequirementKind
+        proof.ProofRequirementKind#PREREQUISITE:proof.ProofRequirementKind
+        proof.ProofResolution#AMBIGUOUS:proof.ProofResolution
+        proof.ProofResolution#FAILED:proof.ProofResolution
+        proof.ProofResolution#MISSING:proof.ProofResolution
+        proof.ProofResolution#NOT_EVALUATED:proof.ProofResolution
+        proof.ProofResolution#SATISFIED:proof.ProofResolution
+        proof.ProofResolution#TIMED_OUT:proof.ProofResolution
+        proof.ProofResolution#UNREACHED:proof.ProofResolution
+        proof.ProofResolution#UNSUPPORTED:proof.ProofResolution
+        proof.ProofResolution#VIOLATED:proof.ProofResolution
+        proof.ProofResolutionReason#ACTIVATION_NOT_REACHED:proof.ProofResolutionReason
+        proof.ProofResolutionReason#CAUSAL_RELATION_ESTABLISHED:proof.ProofResolutionReason
+        proof.ProofResolutionReason#CAUSAL_RELATION_UNREACHED:proof.ProofResolutionReason
+        proof.ProofResolutionReason#CAUSAL_RELATION_VIOLATED:proof.ProofResolutionReason
+        proof.ProofResolutionReason#CONTROL_CORRELATION_INVALIDATED:proof.ProofResolutionReason
+        proof.ProofResolutionReason#CONTROL_FAILED:proof.ProofResolutionReason
+        proof.ProofResolutionReason#CONTROL_MATCH_AMBIGUOUS:proof.ProofResolutionReason
+        proof.ProofResolutionReason#CONTROL_REACHED_EXPECTED_STATE:proof.ProofResolutionReason
+        proof.ProofResolutionReason#CONTROL_SELECTOR_FAILED:proof.ProofResolutionReason
+        proof.ProofResolutionReason#CONTROL_SESSION_ENDED:proof.ProofResolutionReason
+        proof.ProofResolutionReason#CONTROL_TIMED_OUT:proof.ProofResolutionReason
+        proof.ProofResolutionReason#CONTROL_UNREACHED:proof.ProofResolutionReason
+        proof.ProofResolutionReason#CORRELATION_AMBIGUOUS:proof.ProofResolutionReason
+        proof.ProofResolutionReason#CORRELATION_MISSING:proof.ProofResolutionReason
+        proof.ProofResolutionReason#CORRELATION_UNIQUE:proof.ProofResolutionReason
+        proof.ProofResolutionReason#DEADLINE_EXPIRED:proof.ProofResolutionReason
+        proof.ProofResolutionReason#EVALUATION_COMPLETED:proof.ProofResolutionReason
+        proof.ProofResolutionReason#EVALUATION_FAILED:proof.ProofResolutionReason
+        proof.ProofResolutionReason#EVALUATION_NOT_REACHED:proof.ProofResolutionReason
+        proof.ProofResolutionReason#EVIDENCE_MISSING:proof.ProofResolutionReason
+        proof.ProofResolutionReason#EVIDENCE_PRESENT:proof.ProofResolutionReason
+        proof.ProofResolutionReason#NOT_EVALUATED_AFTER_TERMINAL_OUTCOME:proof.ProofResolutionReason
+        proof.ProofResolutionReason#OBSERVATION_ACTIVE:proof.ProofResolutionReason
+        proof.ProofResolutionReason#OBSERVATION_FAILED:proof.ProofResolutionReason
+        proof.ProofResolutionReason#OBSERVATION_LOST:proof.ProofResolutionReason
+        proof.ProofResolutionReason#OBSERVATION_UNSUPPORTED:proof.ProofResolutionReason
+        proof.ProofResolutionReason#PREREQUISITE_FAILED:proof.ProofResolutionReason
+        proof.ProofResolutionReason#PREREQUISITE_SATISFIED:proof.ProofResolutionReason
+        proof.ProofResolutionReason#PREREQUISITE_UNSUPPORTED:proof.ProofResolutionReason
+        proof.ProofResolutionReason#STIMULUS_COMPLETED:proof.ProofResolutionReason
+        proof.ProofResolutionReason#STIMULUS_FAILED:proof.ProofResolutionReason
+        proof.ProofResolutionReason#STIMULUS_NOT_COMPLETED:proof.ProofResolutionReason
+        proof.ProofStimulusState#COMPLETED:proof.ProofStimulusState
+        proof.ProofStimulusState#FAILED:proof.ProofStimulusState
+        proof.ProofStimulusState#NOT_STARTED:proof.ProofStimulusState
+        proof.ProofStimulusState#RUNNING:proof.ProofStimulusState
         topology.PortDirection#PROVIDED:topology.PortDirection
         topology.PortDirection#REQUIRED:topology.PortDirection
         """);
@@ -370,6 +501,9 @@ class CoreArchitectureTest {
         journal -> topology
         observation -> topology
         proof -> observation
+        proof -> control
+        proof -> journal
+        proof -> topology
         topology -> component
         """);
 
@@ -642,6 +776,82 @@ class CoreArchitectureTest {
                 || method.getName().equals("consumerTarget")
                 || method.getReturnType().equals(EndpointBinding.class)
         );
+    }
+
+    @Test
+    void shouldPinExplicitProofExecutionSurfaceAndInternalizeEvaluationState()
+        throws Exception {
+        Class<?> proofs = loadType("proof.Proofs");
+        Class<?> execution = loadType("proof.ProofExecution");
+        Class<?> plan = loadType("proof.ProofPlan");
+        Class<?> builder = loadType("proof.ProofPlan$Builder");
+        Class<?> result = loadType("proof.ProofResult");
+        assertThat(methodKeys(proofs)).containsExactly(
+            "activate(proof.ProofPlan):proof.ProofExecution",
+            "failedPrerequisite(java.lang.Throwable):proof.ProofPrerequisite",
+            "satisfiedPrerequisite():proof.ProofPrerequisite",
+            "unsupportedPrerequisite():proof.ProofPrerequisite"
+        );
+        assertThat(methodKeys(execution)).containsExactly(
+            "evaluate():proof.ProofResult",
+            "result():proof.ProofResult",
+            "runStimulus(java.lang.Runnable):void",
+            "state():proof.ProofExecutionState"
+        );
+        assertThat(methodKeys(plan)).containsExactly(
+            "builder(java.lang.String,java.lang.String,proof.ProofSubjectRef,java.time.Duration):proof.ProofPlan$Builder",
+            "deadline():java.time.Duration",
+            "id():proof.ProofPlanId",
+            "primarySubject():proof.ProofSubjectRef",
+            "requirements():java.util.List",
+            "title():java.lang.String",
+            "toString():java.lang.String"
+        );
+        assertThat(methodKeys(builder)).containsExactly(
+            "build():proof.ProofPlan",
+            "causalRelation(java.lang.String,control.SemanticPredecessorGuard):proof.ProofPlan$Builder",
+            "control(java.lang.String,control.SemanticHold,control.SemanticHoldState):proof.ProofPlan$Builder",
+            "control(java.lang.String,control.SemanticPredecessorGuard,control.SemanticPredecessorGuardState):proof.ProofPlan$Builder",
+            "correlation(java.lang.String,topology.ConnectionId,proof.CorrelationKey,observation.EvidenceSchemaId):proof.ProofPlan$Builder",
+            "evidence(java.lang.String,control.SemanticHold):proof.ProofPlan$Builder",
+            "evidence(java.lang.String,control.SemanticPredecessorGuard,proof.ProofEvidenceKind):proof.ProofPlan$Builder",
+            "observation(java.lang.String,topology.ConnectionId,observation.RequiredObservationProfile):proof.ProofPlan$Builder",
+            "prerequisite(java.lang.String,proof.ProofPrerequisite):proof.ProofPlan$Builder"
+        );
+        assertThat(methodKeys(result)).containsExactly(
+            "decisiveResolution():java.util.Optional",
+            "evaluation():proof.ProofEvaluationResolution",
+            "outcome():proof.ProofOutcome",
+            "planId():proof.ProofPlanId",
+            "primaryFailure():java.util.Optional",
+            "primarySubject():proof.ProofSubjectRef",
+            "report():proof.ProofReport",
+            "require(proof.ProofOutcome):proof.ProofResult",
+            "resolutions():java.util.List",
+            "secondaryDiagnostics():java.util.List",
+            "stimulus():proof.ProofStimulusResolution",
+            "title():java.lang.String",
+            "toString():java.lang.String",
+            "unresolved():java.util.List"
+        );
+        assertThat(externallyVisibleMethods(proofs, execution, plan, builder, result))
+            .allSatisfy(method -> {
+                assertThat(method.getReturnType())
+                    .isNotEqualTo(io.github.jacekkardys.systemproof.journal
+                        .ScenarioJournalSnapshot.class);
+                assertThat(method.getParameterTypes())
+                    .doesNotContain(io.github.jacekkardys.systemproof.journal
+                        .ScenarioJournalSnapshot.class);
+            });
+
+        assertThat(List.of(
+            "environment.ProofExecutionCoordinator",
+            "environment.ProofOutcomeEvaluator",
+            "environment.ProofFactObserver",
+            "environment.ProofObservationListener"
+        )).allSatisfy(name -> assertThat(
+            Modifier.isPublic(loadType(name).getModifiers())
+        ).isFalse());
     }
 
     @Test

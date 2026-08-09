@@ -2,10 +2,12 @@ package io.github.jacekkardys.systemproof.environment;
 
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Consumer;
 import io.github.jacekkardys.systemproof.proof.CorrelationCardinality;
 import io.github.jacekkardys.systemproof.proof.CorrelationKey;
 import io.github.jacekkardys.systemproof.proof.CorrelationResult;
@@ -18,7 +20,16 @@ import io.github.jacekkardys.systemproof.observation.InteractionRef;
 import io.github.jacekkardys.systemproof.observation.SessionId;
 import io.github.jacekkardys.systemproof.topology.ConnectionId;
 
-/** Environment-owned linearizable subject registry and current-state journal index. */
+/**
+ * Environment-owned linearizable subject registry and current-state journal index.
+ *
+ * <p>Mutating publications enter the proof fact-batch boundary before this registry monitor.
+ * A successful journal append commits the matching registry mutation and typed proof fact before
+ * best-effort diagnostic emission. The registry is released before proof evaluation receives the
+ * complete fact batch. The global order is semantic controls, authoritative-operation boundary,
+ * proof subjects, journal publication, proof evaluation; completion delivery runs only after all
+ * of them are released.
+ */
 final class ProofSubjectRegistry implements ProofSubjects {
     private static final long FIRST_SUBJECT_VALUE = 1L;
 
@@ -35,38 +46,63 @@ final class ProofSubjectRegistry implements ProofSubjects {
     }
 
     @Override
-    public synchronized ProofSubjectRef create() {
-        requireAccepting("create proof subjects");
-        ProofSubjectRef subject = createReference();
-        events.proofSubjectCreated(subject);
-        subjects.put(subject, new SubjectState());
-        return subject;
+    public ProofSubjectRef create() {
+        return events.proofFactBatch(() -> {
+            synchronized (this) {
+                requireAccepting("create proof subjects");
+                ProofSubjectRef subject = createReference();
+                events.proofSubjectCreated(
+                    subject,
+                    () -> {
+                        subjects.put(subject, new SubjectState());
+                        advanceReference();
+                    }
+                );
+                return subject;
+            }
+        });
     }
 
     @Override
-    public synchronized void arm(ProofSubjectRef subject, CorrelationKey key) {
+    public void arm(ProofSubjectRef subject, CorrelationKey key) {
+        events.proofFactBatch(() -> {
+            synchronized (this) {
+                armLocked(subject, key);
+            }
+            return null;
+        });
+    }
+
+    private void armLocked(ProofSubjectRef subject, CorrelationKey key) {
         requireAccepting("arm proof subjects");
         SubjectState subjectState = requireSubject(subject);
         key = Objects.requireNonNull(key, "key must not be null");
+        CorrelationKey armedKey = key;
         if (subjectState.resolutions.containsKey(key)) {
             return;
         }
 
         Set<ProofSubjectRef> existingSubjects = subjectsByKey.get(key);
         boolean sharedKey = existingSubjects != null && !existingSubjects.isEmpty();
-        events.proofSubjectArmed(subject, key, sharedKey);
-
-        if (sharedKey) {
-            for (ProofSubjectRef existingSubject : existingSubjects) {
-                SubjectState existingState = requireSubject(existingSubject);
-                existingState.resolutions.get(key).replaceAll(
-                    (schema, resolution) -> Ambiguous.INSTANCE
-                );
+        Set<ProofSubjectRef> sharedSubjects = existingSubjects;
+        events.proofSubjectArmed(subject, key, sharedKey, () -> {
+            if (sharedKey) {
+                for (ProofSubjectRef existingSubject : sharedSubjects) {
+                    SubjectState existingState = requireSubject(existingSubject);
+                    existingState.resolutions.get(armedKey).replaceAll(
+                        (schema, resolution) -> Ambiguous.INSTANCE
+                    );
+                    existingState.exactResolutions.replaceAll(
+                        (exact, resolution) -> exact.key().equals(armedKey)
+                            ? Ambiguous.INSTANCE
+                            : resolution
+                    );
+                }
             }
-        }
-        subjectState.resolutions.put(key, new HashMap<>());
-        subjectsByKey.computeIfAbsent(key, ignored -> new HashSet<>())
-            .add(subject);
+            subjectState.resolutions.put(armedKey, new HashMap<>());
+            subjectsByKey.computeIfAbsent(armedKey, ignored -> new HashSet<>())
+                .add(subject);
+        });
     }
 
     @Override
@@ -111,7 +147,19 @@ final class ProofSubjectRegistry implements ProofSubjects {
         };
     }
 
-    synchronized void publish(
+    void publish(
+        InteractionRef interactionRef,
+        CorrelationContribution<?> contribution
+    ) {
+        events.proofFactBatch(() -> {
+            synchronized (this) {
+                publishLocked(interactionRef, contribution);
+            }
+            return null;
+        });
+    }
+
+    private void publishLocked(
         InteractionRef interactionRef,
         CorrelationContribution<?> contribution
     ) {
@@ -135,7 +183,8 @@ final class ProofSubjectRegistry implements ProofSubjects {
                 key,
                 interactionRef,
                 nativeReference,
-                CorrelationCardinality.MISSING
+                CorrelationCardinality.MISSING,
+                () -> {}
             );
             return;
         }
@@ -145,7 +194,8 @@ final class ProofSubjectRegistry implements ProofSubjects {
                 key,
                 interactionRef,
                 nativeReference,
-                CorrelationCardinality.AMBIGUOUS
+                CorrelationCardinality.AMBIGUOUS,
+                () -> {}
             );
             return;
         }
@@ -157,6 +207,21 @@ final class ProofSubjectRegistry implements ProofSubjects {
             "Armed proof subject has no correlation resolution"
         );
         EvidenceSchemaId nativeReferenceSchema = nativeReference.schemaId();
+        ExactCorrelation exactCorrelation = new ExactCorrelation(
+            key,
+            interactionRef.connectionId(),
+            nativeReferenceSchema
+        );
+        Resolution exactCurrent = subjectState.exactResolutions.getOrDefault(
+            exactCorrelation,
+            Missing.INSTANCE
+        );
+        Resolution exactNext = exactCurrent instanceof Unique exactUnique
+            && exactUnique.sameCandidate(interactionRef, nativeReference)
+                ? exactCurrent
+                : exactCurrent == Missing.INSTANCE
+                    ? new Unique(interactionRef, nativeReference)
+                    : Ambiguous.INSTANCE;
         Resolution current = bySchema.getOrDefault(
             nativeReferenceSchema,
             Missing.INSTANCE
@@ -169,18 +234,22 @@ final class ProofSubjectRegistry implements ProofSubjects {
         CorrelationCardinality cardinality = current == Missing.INSTANCE
             ? CorrelationCardinality.UNIQUE
             : CorrelationCardinality.AMBIGUOUS;
+        InteractionRef committedInteraction = interactionRef;
         events.correlationCandidate(
             Optional.of(subject),
             key,
-            interactionRef,
+            committedInteraction,
             nativeReference,
-            cardinality
-        );
-        bySchema.put(
-            nativeReferenceSchema,
-            cardinality == CorrelationCardinality.UNIQUE
-                ? new Unique(interactionRef, nativeReference)
-                : Ambiguous.INSTANCE
+            cardinality,
+            () -> {
+                subjectState.exactResolutions.put(exactCorrelation, exactNext);
+                bySchema.put(
+                    nativeReferenceSchema,
+                    cardinality == CorrelationCardinality.UNIQUE
+                        ? new Unique(committedInteraction, nativeReference)
+                        : Ambiguous.INSTANCE
+                );
+            }
         );
     }
 
@@ -310,17 +379,86 @@ final class ProofSubjectRegistry implements ProofSubjects {
         return selectedSubjectFound;
     }
 
+    synchronized void withCorrelationBoundary(
+        ProofSubjectRef subject,
+        List<CorrelationRequirement> requirements,
+        Consumer<List<CorrelationSnapshot>> action
+    ) {
+        SubjectState selected = requireSubject(subject);
+        requirements = List.copyOf(Objects.requireNonNull(
+            requirements,
+            "requirements must not be null"
+        ));
+        action = Objects.requireNonNull(action, "action must not be null");
+        List<CorrelationSnapshot> snapshots = requirements.stream()
+            .map(requirement -> correlationSnapshot(selected, requirement))
+            .toList();
+        action.accept(snapshots);
+    }
+
+    private CorrelationSnapshot correlationSnapshot(
+        SubjectState selected,
+        CorrelationRequirement requirement
+    ) {
+        if (!selected.resolutions.containsKey(requirement.key())) {
+            return new CorrelationSnapshot(CorrelationCardinality.MISSING, Optional.empty());
+        }
+        if (hasSharedOwnership(requirement.key())) {
+            return new CorrelationSnapshot(
+                CorrelationCardinality.AMBIGUOUS,
+                Optional.empty()
+            );
+        }
+        if (requirement.acceptedInteraction().isEmpty()) {
+            return new CorrelationSnapshot(
+                CorrelationCardinality.MISSING,
+                Optional.empty()
+            );
+        }
+        Resolution resolution = selected.exactResolutions.getOrDefault(
+            new ExactCorrelation(
+                requirement.key(),
+                requirement.connectionId(),
+                requirement.nativeReferenceSchema()
+            ),
+            Missing.INSTANCE
+        );
+        return switch (resolution) {
+            case Missing ignored -> new CorrelationSnapshot(
+                CorrelationCardinality.MISSING,
+                Optional.empty()
+            );
+            case Ambiguous ignored -> new CorrelationSnapshot(
+                CorrelationCardinality.AMBIGUOUS,
+                Optional.empty()
+            );
+            case Unique unique -> unique.interactionRef.equals(
+                requirement.acceptedInteraction().orElseThrow()
+            )
+                ? new CorrelationSnapshot(
+                    CorrelationCardinality.UNIQUE,
+                    Optional.of(unique.interactionRef)
+                )
+                : new CorrelationSnapshot(
+                    CorrelationCardinality.MISSING,
+                    Optional.empty()
+                );
+        };
+    }
+
     private ProofSubjectRef createReference() {
         if (nextSubjectValue < FIRST_SUBJECT_VALUE) {
             throw new IllegalStateException(
                 "Proof-subject identity space is exhausted for this environment execution"
             );
         }
-        ProofSubjectRef reference = new RuntimeProofSubjectRef(owner, nextSubjectValue);
+        return new RuntimeProofSubjectRef(owner, nextSubjectValue);
+    }
+
+    private void advanceReference() {
         nextSubjectValue = nextSubjectValue == Long.MAX_VALUE
             ? Long.MIN_VALUE
             : nextSubjectValue + 1L;
-        return reference;
     }
 
     private SubjectState requireSubject(ProofSubjectRef subject) {
@@ -352,11 +490,69 @@ final class ProofSubjectRegistry implements ProofSubjects {
         return subjectsByKey.getOrDefault(key, Set.of()).size() > 1;
     }
 
+    record CorrelationRequirement(
+        CorrelationKey key,
+        ConnectionId connectionId,
+        EvidenceSchemaId nativeReferenceSchema,
+        Optional<InteractionRef> acceptedInteraction
+    ) {
+        CorrelationRequirement {
+            Objects.requireNonNull(key, "key must not be null");
+            Objects.requireNonNull(connectionId, "connectionId must not be null");
+            Objects.requireNonNull(
+                nativeReferenceSchema,
+                "nativeReferenceSchema must not be null"
+            );
+            acceptedInteraction = Objects.requireNonNull(
+                acceptedInteraction,
+                "acceptedInteraction must not be null"
+            );
+            acceptedInteraction.ifPresent(value -> {
+                if (!value.connectionId().equals(connectionId)) {
+                    throw new IllegalArgumentException(
+                        "Accepted correlation interaction must use the required connection"
+                    );
+                }
+            });
+        }
+    }
+
+    record CorrelationSnapshot(
+        CorrelationCardinality cardinality,
+        Optional<InteractionRef> interaction
+    ) {
+        CorrelationSnapshot {
+            Objects.requireNonNull(cardinality, "cardinality must not be null");
+            interaction = Objects.requireNonNull(interaction, "interaction must not be null");
+            if ((cardinality == CorrelationCardinality.UNIQUE) != interaction.isPresent()) {
+                throw new IllegalArgumentException(
+                    "Only a unique correlation snapshot retains an interaction reference"
+                );
+            }
+        }
+    }
+
     private static final class SubjectState {
         private final Map<
             CorrelationKey,
             Map<EvidenceSchemaId, Resolution>
         > resolutions = new HashMap<>();
+        private final Map<ExactCorrelation, Resolution> exactResolutions = new HashMap<>();
+    }
+
+    private record ExactCorrelation(
+        CorrelationKey key,
+        ConnectionId connectionId,
+        EvidenceSchemaId nativeReferenceSchema
+    ) {
+        private ExactCorrelation {
+            Objects.requireNonNull(key, "key must not be null");
+            Objects.requireNonNull(connectionId, "connectionId must not be null");
+            Objects.requireNonNull(
+                nativeReferenceSchema,
+                "nativeReferenceSchema must not be null"
+            );
+        }
     }
 
     private static final class RuntimeProofSubjectRef implements ProofSubjectRef {

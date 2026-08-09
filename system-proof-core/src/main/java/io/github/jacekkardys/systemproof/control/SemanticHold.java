@@ -3,7 +3,12 @@ package io.github.jacekkardys.systemproof.control;
 import java.util.concurrent.CompletionStage;
 import io.github.jacekkardys.systemproof.observation.InteractionRef;
 
-/** One environment-owned, one-shot semantic hold handle. */
+/**
+ * One environment-owned, one-shot semantic hold handle.
+ *
+ * <p>Public completion roots are delivered independently after their framework state transition.
+ * Synchronous dependent execution order is unspecified and never runs on the transition owner.
+ */
 public interface SemanticHold {
     SemanticHoldRef ref();
 

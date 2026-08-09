@@ -120,7 +120,8 @@ class SemanticPredecessorGuardTest {
             SemanticPredecessorGuardState.SATISFIED
         );
         assertThat(facts(fixture).stream()
-            .filter(event -> event.kind() == SemanticPredecessorGuardEvent.Kind.RELATION))
+            .filter(event -> event.kind() == SemanticPredecessorGuardEvent.Kind.TERMINAL
+                && event.state() == SemanticPredecessorGuardState.SATISFIED))
             .singleElement()
             .satisfies(event -> {
                 assertThat(event.predecessor()).contains(predecessor.interactionRef());
@@ -149,7 +150,8 @@ class SemanticPredecessorGuardTest {
             SemanticPredecessorGuardState.VIOLATED
         );
         assertThat(facts(fixture).stream()
-            .filter(event -> event.kind() == SemanticPredecessorGuardEvent.Kind.VIOLATION))
+            .filter(event -> event.kind() == SemanticPredecessorGuardEvent.Kind.TERMINAL
+                && event.state() == SemanticPredecessorGuardState.VIOLATED))
             .singleElement()
             .satisfies(event -> {
                 assertThat(event.successor()).contains(successor.interactionRef());
@@ -918,7 +920,8 @@ class SemanticPredecessorGuardTest {
     ) {
         return facts(fixture).stream()
             .filter(event -> event.guardRef().equals(guard.ref()))
-            .filter(event -> event.kind() == SemanticPredecessorGuardEvent.Kind.RELATION)
+            .filter(event -> event.kind() == SemanticPredecessorGuardEvent.Kind.TERMINAL
+                && event.state() == SemanticPredecessorGuardState.SATISFIED)
             .toList();
     }
 

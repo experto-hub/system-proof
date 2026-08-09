@@ -31,13 +31,15 @@ final class RuntimeConnectionCatalog {
         EnvironmentEventPublisher events,
         ConnectionRouting routing,
         InteractionDecisionCoordinator coordinator,
-        ProofSubjectRegistry proofSubjects
+        ProofSubjectRegistry proofSubjects,
+        ProofEvidenceWindowTracker evidenceWindows
     ) {
         Objects.requireNonNull(declarations, "declarations must not be null");
         events = Objects.requireNonNull(events, "events must not be null");
         routing = Objects.requireNonNull(routing, "routing must not be null");
         coordinator = Objects.requireNonNull(coordinator, "coordinator must not be null");
         proofSubjects = Objects.requireNonNull(proofSubjects, "proofSubjects must not be null");
+        evidenceWindows = Objects.requireNonNull(evidenceWindows, "evidenceWindows must not be null");
 
         List<RuntimeConnection<?>> materialized = new ArrayList<>(declarations.size());
         Map<ConnectionId, RuntimeConnection<?>> byId = new LinkedHashMap<>();
@@ -47,7 +49,8 @@ final class RuntimeConnectionCatalog {
                 events,
                 routing,
                 coordinator,
-                proofSubjects
+                proofSubjects,
+                evidenceWindows
             );
             RuntimeConnection<?> duplicateId = byId.putIfAbsent(connection.id(), connection);
             if (duplicateId != null) {
@@ -132,7 +135,8 @@ final class RuntimeConnectionCatalog {
         EnvironmentEventPublisher events,
         ConnectionRouting routing,
         InteractionDecisionCoordinator coordinator,
-        ProofSubjectRegistry proofSubjects
+        ProofSubjectRegistry proofSubjects,
+        ProofEvidenceWindowTracker evidenceWindows
     ) {
         return switch (declaration) {
             case Connection<?> connection -> materializeTyped(
@@ -140,7 +144,8 @@ final class RuntimeConnectionCatalog {
                 events,
                 routing,
                 coordinator,
-                proofSubjects
+                proofSubjects,
+                evidenceWindows
             );
         };
     }
@@ -150,12 +155,18 @@ final class RuntimeConnectionCatalog {
         EnvironmentEventPublisher events,
         ConnectionRouting routing,
         InteractionDecisionCoordinator coordinator,
-        ProofSubjectRegistry proofSubjects
+        ProofSubjectRegistry proofSubjects,
+        ProofEvidenceWindowTracker evidenceWindows
     ) {
         return new RuntimeConnection<>(
             declaration,
             routing.select(declaration),
-            new ConnectionObservationPublisher(declaration, events, proofSubjects),
+            new ConnectionObservationPublisher(
+                declaration,
+                events,
+                proofSubjects,
+                evidenceWindows
+            ),
             coordinator
         );
     }

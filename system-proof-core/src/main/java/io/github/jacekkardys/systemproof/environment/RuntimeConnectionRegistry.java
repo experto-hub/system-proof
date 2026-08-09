@@ -17,6 +17,9 @@ import io.github.jacekkardys.systemproof.topology.ProvidedPort;
 import io.github.jacekkardys.systemproof.topology.RequiredPort;
 import io.github.jacekkardys.systemproof.environment.state.RoutingMode;
 import io.github.jacekkardys.systemproof.environment.state.RuntimeConnectionSnapshot;
+import io.github.jacekkardys.systemproof.observation.RequiredObservationProfile;
+import io.github.jacekkardys.systemproof.observation.RequiredObservationProfile.Capability;
+import io.github.jacekkardys.systemproof.observation.EvidenceSchemaId;
 
 /**
  * One environment-owned materialization of the immutable topology connection declarations.
@@ -28,6 +31,8 @@ import io.github.jacekkardys.systemproof.environment.state.RuntimeConnectionSnap
 final class RuntimeConnectionRegistry {
     private final RuntimeConnectionCatalog catalog;
     private final EnvironmentEventPublisher events;
+    private final ProofObservationListener proofObservations;
+    private final ProofEvidenceWindowTracker evidenceWindows;
 
     RuntimeConnectionRegistry(
         List<ConnectionRef> declarations,
@@ -111,13 +116,64 @@ final class RuntimeConnectionRegistry {
         ProofSubjectRegistry proofSubjects,
         SemanticControlCapabilityRegistry controlCapabilities
     ) {
+        this(
+            declarations,
+            events,
+            routing,
+            coordinator,
+            proofSubjects,
+            controlCapabilities,
+            ProofObservationListener.NONE
+        );
+    }
+
+    RuntimeConnectionRegistry(
+        List<ConnectionRef> declarations,
+        EnvironmentEventPublisher events,
+        ConnectionRouting routing,
+        InteractionDecisionCoordinator coordinator,
+        ProofSubjectRegistry proofSubjects,
+        SemanticControlCapabilityRegistry controlCapabilities,
+        ProofObservationListener proofObservations
+    ) {
+        this(
+            declarations,
+            events,
+            routing,
+            coordinator,
+            proofSubjects,
+            controlCapabilities,
+            proofObservations,
+            new ProofEvidenceWindowTracker()
+        );
+    }
+
+    RuntimeConnectionRegistry(
+        List<ConnectionRef> declarations,
+        EnvironmentEventPublisher events,
+        ConnectionRouting routing,
+        InteractionDecisionCoordinator coordinator,
+        ProofSubjectRegistry proofSubjects,
+        SemanticControlCapabilityRegistry controlCapabilities,
+        ProofObservationListener proofObservations,
+        ProofEvidenceWindowTracker evidenceWindows
+    ) {
         this.events = Objects.requireNonNull(events, "events must not be null");
+        this.proofObservations = Objects.requireNonNull(
+            proofObservations,
+            "proofObservations must not be null"
+        );
+        this.evidenceWindows = Objects.requireNonNull(
+            evidenceWindows,
+            "evidenceWindows must not be null"
+        );
         catalog = new RuntimeConnectionCatalog(
             declarations,
             events,
             routing,
             coordinator,
-            proofSubjects
+            proofSubjects,
+            evidenceWindows
         );
         Objects.requireNonNull(
             controlCapabilities,
@@ -129,6 +185,25 @@ final class RuntimeConnectionRegistry {
             connection.requiredObservationProfile()
         ));
         catalog.all().forEach(this::recordLifecycle);
+    }
+
+    ProofEvidenceWindowTracker.EvidenceWindow openProofEvidenceWindow(
+        java.util.function.Consumer<ProofEvidenceWindowTracker.EvidenceWindow> admission
+    ) {
+        return evidenceWindows.openWindow(admission);
+    }
+
+    boolean isWithinProofEvidenceWindow(
+        ProofEvidenceWindowTracker.EvidenceWindow window,
+        io.github.jacekkardys.systemproof.observation.InteractionRef interaction
+    ) {
+        window = Objects.requireNonNull(window, "window must not be null");
+        if (!window.belongsTo(evidenceWindows)) {
+            throw new IllegalArgumentException(
+                "Proof evidence window belongs to a different environment execution"
+            );
+        }
+        return window.includes(interaction);
     }
 
     synchronized void beginStartup() {
@@ -189,6 +264,13 @@ final class RuntimeConnectionRegistry {
             .toList());
     }
 
+    synchronized ObservationBatch observationRefreshBatch(Set<ConnectionId> connectionIds) {
+        return new ObservationBatch(proofObservationConnections(connectionIds).stream()
+            .map(RuntimeConnection::refreshObservationProbe)
+            .filter(Objects::nonNull)
+            .toList());
+    }
+
     synchronized void applyObservationRefresh(ObservationResults results) {
         Objects.requireNonNull(results, "results must not be null");
         List<RuntimeConnection.ObservationProbe> expected = catalog.all().stream()
@@ -209,9 +291,108 @@ final class RuntimeConnectionRegistry {
             }
             expected.get(index).connection().validateObservationRefresh(result);
         }
-        results.values().forEach(result ->
-            result.connection().applyObservationRefresh(result)
+        results.values().forEach(result -> {
+            result.connection().applyObservationRefresh(result);
+            proofObservations.observationChanged(result.connection().snapshot());
+        });
+    }
+
+    synchronized void applyObservationRefresh(
+        ObservationResults results,
+        Set<ConnectionId> connectionIds
+    ) {
+        Objects.requireNonNull(results, "results must not be null");
+        List<RuntimeConnection.ObservationProbe> expected = proofObservationConnections(
+            connectionIds
+        ).stream()
+            .map(RuntimeConnection::refreshObservationProbe)
+            .filter(Objects::nonNull)
+            .toList();
+        if (results.values().size() != expected.size()) {
+            throw new IllegalStateException(
+                "Proof observation refresh count changed during capture"
+            );
+        }
+        for (int index = 0; index < expected.size(); index++) {
+            RuntimeConnection.ObservationResult result = results.values().get(index);
+            if (result.connection() != expected.get(index).connection()) {
+                throw new IllegalStateException(
+                    "Proof observation refresh order changed during capture"
+                );
+            }
+            expected.get(index).connection().validateObservationRefresh(result);
+        }
+        results.values().forEach(result -> {
+            result.connection().applyObservationRefresh(result);
+            proofObservations.observationChanged(result.connection().snapshot());
+        });
+    }
+
+    private List<RuntimeConnection<?>> proofObservationConnections(
+        Set<ConnectionId> connectionIds
+    ) {
+        Objects.requireNonNull(connectionIds, "connectionIds must not be null");
+        List<RuntimeConnection<?>> selected = new ArrayList<>();
+        for (ConnectionId value : connectionIds) {
+            selected.add(catalog.connection(Objects.requireNonNull(
+                value,
+                "connectionIds must not contain null"
+            )));
+        }
+        return List.copyOf(selected);
+    }
+
+    synchronized void validateProofObservation(
+        ConnectionId connectionId,
+        RequiredObservationProfile expectedProfile
+    ) {
+        RuntimeConnection<?> connection = catalog.connection(connectionId);
+        expectedProfile = Objects.requireNonNull(
+            expectedProfile,
+            "expectedProfile must not be null"
         );
+        if (connection.routingMode() != RoutingMode.ROUTED
+            || connection.observationRequirement()
+                != io.github.jacekkardys.systemproof.observation.ObservationRequirement.REQUIRED) {
+            throw new IllegalArgumentException(
+                "Connection '" + connectionId
+                    + "' is not a required routed observation path"
+            );
+        }
+        RequiredObservationProfile actual = connection.requiredObservationProfile()
+            .orElseThrow(() -> new IllegalArgumentException(
+                "Connection '" + connectionId + "' has no required observation profile"
+            ));
+        if (!actual.equals(expectedProfile)) {
+            throw new IllegalArgumentException(
+                "Required observation profile does not match connection '"
+                    + connectionId + "'"
+            );
+        }
+    }
+
+    synchronized void validateProofCorrelation(
+        ConnectionId connectionId,
+        EvidenceSchemaId nativeReferenceSchema
+    ) {
+        RuntimeConnection<?> connection = catalog.connection(connectionId);
+        nativeReferenceSchema = Objects.requireNonNull(
+            nativeReferenceSchema,
+            "nativeReferenceSchema must not be null"
+        );
+        RequiredObservationProfile profile = connection.requiredObservationProfile()
+            .orElseThrow(() -> new IllegalArgumentException(
+                "Connection '" + connectionId
+                    + "' has no correlation observation profile"
+            ));
+        if (!profile.capabilities().contains(Capability.CORRELATION_CONTRIBUTIONS)
+            || profile.nativeFlowReferenceSchema()
+                .filter(nativeReferenceSchema::equals).isEmpty()) {
+            throw new IllegalArgumentException(
+                "Native-reference schema does not match connection '"
+                    + connectionId + "'"
+            );
+        }
     }
 
     synchronized void failObservationMaterialization(Throwable failure) {

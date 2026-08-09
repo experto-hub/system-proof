@@ -16,6 +16,7 @@ final class ConnectionObservationPublisher implements ConnectionObservations {
     private final ConnectionRef connection;
     private final EnvironmentEventPublisher events;
     private final ProofSubjectRegistry proofSubjects;
+    private final ProofEvidenceWindowTracker evidenceWindows;
     private long nextSessionValue = SessionId.FIRST_VALUE;
 
     ConnectionObservationPublisher(
@@ -23,11 +24,24 @@ final class ConnectionObservationPublisher implements ConnectionObservations {
         EnvironmentEventPublisher events,
         ProofSubjectRegistry proofSubjects
     ) {
+        this(connection, events, proofSubjects, new ProofEvidenceWindowTracker());
+    }
+
+    ConnectionObservationPublisher(
+        ConnectionRef connection,
+        EnvironmentEventPublisher events,
+        ProofSubjectRegistry proofSubjects,
+        ProofEvidenceWindowTracker evidenceWindows
+    ) {
         this.connection = Objects.requireNonNull(connection, "connection must not be null");
         this.events = Objects.requireNonNull(events, "events must not be null");
         this.proofSubjects = Objects.requireNonNull(
             proofSubjects,
             "proofSubjects must not be null"
+        );
+        this.evidenceWindows = Objects.requireNonNull(
+            evidenceWindows,
+            "evidenceWindows must not be null"
         );
     }
 
@@ -130,6 +144,7 @@ final class ConnectionObservationPublisher implements ConnectionObservations {
                 : nextOrdinal + 1L;
             InteractionRef interactionRef =
                 new InteractionRef(sessionId, direction, ordinal);
+            evidenceWindows.recorded(interactionRef);
             events.interaction(connection, interactionRef, snapshot);
             lastObservedOrdinal = ordinal;
             return new RecordedInteraction(interactionRef, snapshot);

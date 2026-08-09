@@ -69,6 +69,11 @@ public final class OpaqueReferenceDiagnosticsFixture {
             FlowDirection.CONSUMER_TO_PROVIDER,
             InteractionRef.FIRST_ORDINAL
         );
+        InteractionRef successor = new InteractionRef(
+            interaction.sessionId(),
+            interaction.direction(),
+            InteractionRef.FIRST_ORDINAL + 1
+        );
         EvidenceSnapshot evidence = EvidenceSnapshot.capture(EVIDENCE_CODEC, "metadata-only");
         CorrelationKey key = CorrelationKey.ofDigest(
             new CorrelationKeySchema("test", "opaque-reference", 1),
@@ -109,7 +114,7 @@ public final class OpaqueReferenceDiagnosticsFixture {
                 SemanticPredecessorGuardEvent.Kind.DECISION,
                 SemanticPredecessorGuardState.ARMED,
                 Optional.empty(),
-                Optional.of(interaction),
+                Optional.of(successor),
                 Optional.of(ForwardingDecision.FORWARD),
                 Optional.empty(),
                 Optional.empty()
@@ -119,7 +124,7 @@ public final class OpaqueReferenceDiagnosticsFixture {
                 SemanticPredecessorGuardEvent.Kind.RELATION,
                 SemanticPredecessorGuardState.SATISFIED,
                 Optional.of(interaction),
-                Optional.of(interaction),
+                Optional.of(successor),
                 Optional.empty(),
                 Optional.empty(),
                 Optional.empty()
@@ -129,7 +134,7 @@ public final class OpaqueReferenceDiagnosticsFixture {
                 SemanticPredecessorGuardEvent.Kind.VIOLATION,
                 SemanticPredecessorGuardState.VIOLATED,
                 Optional.empty(),
-                Optional.of(interaction),
+                Optional.of(successor),
                 Optional.of(ForwardingDecision.CLOSE_SESSION),
                 Optional.of(SemanticPredecessorViolation.PREDECESSOR_NOT_ESTABLISHED),
                 Optional.empty()

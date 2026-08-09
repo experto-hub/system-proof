@@ -85,6 +85,11 @@ If the successor linearizes first, the coordinator appends an explicit
 `PREDECESSOR_NOT_ESTABLISHED` violation and close decision before returning `CLOSE_SESSION`. The
 gateway forwards zero successor bytes and closes the affected session. The guard remains
 `VIOLATED`; a later predecessor, release, confirmation, or forwarded callback cannot repair it.
+Selectors are evaluated against the guard state before the current interaction is applied. When an
+`ARMED` guard's predecessor and successor selectors both match the same `InteractionRef`, that
+interaction is an early successor: no predecessor fact is committed and the violation retains only
+the successor. A causal relation always requires two distinct interaction identities, even when
+both roles use the same connection.
 Simultaneous gateway tasks therefore have a deterministic result based only on which task enters
 the coordinator first.
 

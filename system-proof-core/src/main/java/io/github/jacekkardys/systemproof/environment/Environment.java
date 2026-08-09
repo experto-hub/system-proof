@@ -14,6 +14,7 @@ import io.github.jacekkardys.systemproof.topology.ConnectionId;
 import io.github.jacekkardys.systemproof.topology.ConnectionRef;
 import io.github.jacekkardys.systemproof.topology.RequiredPort;
 import io.github.jacekkardys.systemproof.control.SemanticControls;
+import io.github.jacekkardys.systemproof.proof.Proofs;
 
 /** Small public facade over an immutable topology and one internal runtime execution. */
 public class Environment implements AutoCloseable {
@@ -85,6 +86,11 @@ public class Environment implements AutoCloseable {
     /** Returns this environment execution's narrow proof-subject correlation facade. */
     public final ProofSubjects proofSubjects() {
         return runtime.proofSubjects();
+    }
+
+    /** Returns this environment execution's frozen-plan proof-evaluation facade. */
+    public final Proofs proofs() {
+        return runtime.proofs();
     }
 
     /** Returns this environment execution's one-shot semantic traffic-control facade. */

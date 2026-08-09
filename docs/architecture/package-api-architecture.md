@@ -48,7 +48,7 @@ duplicate models. Java-public internal types may change at any time.
 | `environment.state` | Detached immutable environment and runtime-connection state. |
 | `journal` | Open event read contract, framework-owned fact vocabulary, immutable entries and snapshots; never storage. |
 | `observation` | Observation policy/status, interaction identity, evidence, and forwarding decisions. |
-| `proof` | Proof-subject and correlation contracts over observation values. |
+| `proof` | Proof-subject/correlation contracts, frozen proof-plan declarations, and detached fail-closed results over observation values. |
 | `topology` | Contracts, ports, protocol/interaction declarations, and logical connections. |
 | `junit.annotation` | Supported JUnit declaration annotations. |
 | `junit.internal` | Unsupported JUnit lifecycle implementation. |
@@ -88,7 +88,7 @@ and its rationale to change together.
 | `environment.state` | `observation`, `topology` |
 | `journal` | `component`, `control`, `environment.state`, `observation`, `proof`, `topology` |
 | `observation` | `topology` |
-| `proof` | `observation` |
+| `proof` | `control`, `journal`, `observation`, `topology` |
 | `topology` | `component` |
 
 There is no `journal -> diagnostics` edge and therefore no diagnostics/journal cycle. Diagnostics
@@ -96,7 +96,7 @@ renders journal facts. There is no `diagnostics -> environment` execution edge; 
 environment dependency is the detached `environment.state` read model. Logging configuration and
 topology membership validation both belong to `environment`.
 
-Three direct two-way relationships remain and are explicit technical exceptions:
+Five direct two-way relationships remain and are explicit technical exceptions:
 
 - `component <-> driver`: a component declaration selects its typed driver, while the driver SPI
   starts a component and returns its runtime;
@@ -105,6 +105,11 @@ Three direct two-way relationships remain and are explicit technical exceptions:
 - `driver <-> environment`: environment executes drivers; the only reverse edge is
   `ComponentRuntime -> RuntimeEndpointBindings`, the non-constructible transfer bridge that can
   publish bindings but cannot look them up.
+- `control <-> proof`: subject-scoped controls use opaque proof identities, while a frozen proof
+  declaration can require exact control references and terminal states without executing them.
+- `journal <-> proof`: journal facts use proof identities and correlation cardinality, while
+  detached proof diagnostics reuse the journal's bounded type-only `FailureDetails`; neither side
+  owns mutable journal storage or proof execution.
 
 The following directions are forbidden and executable tests enforce them:
 
@@ -147,7 +152,8 @@ whole.
   `ConnectionRouting`,
   `EnvironmentStartException`, `ComponentLifecycleException`.
 - Journal severity: `LogLevel`, used by logging configuration and diagnostic facts.
-- Proof access: `ProofSubjects`.
+- Proof access and execution: `ProofSubjects`, `Proofs`, `ProofPrerequisite`, `ProofPlan` and its
+  `Builder`, `ProofExecution`, and `ProofConfigurationException`.
 - Topology declarations: `Connection`, `Contract`, `DeclaredInteraction`, `DeclaredProtocol`,
   `InteractionSpec`, `ProtocolSpec`, `Port`, `PortContract`, `ProvidedPort`, `RequiredPort`, and
   `StartupPrerequisite`.
@@ -205,7 +211,13 @@ remove the marker, and unrelated connections remain independent.
   `EvidenceSnapshot`, `FlowDirection`, `ForwardingDecision`, `SessionId`, `InteractionRef`, and
   `RecordedInteraction`.
 - Proof: `ProofSubjectRef`, `CorrelationKeySchema`, `CorrelationKey`, `CorrelationCardinality`,
-  `CorrelationResult` and nested `Missing`, `Unique`, and `Ambiguous` results.
+  `CorrelationResult` and nested `Missing`, `Unique`, and `Ambiguous` results; `ProofPlanId`,
+  `ProofObligationId`, frozen `ProofPlan.Requirement` records, `ProofExecutionState`, `ProofOutcome`,
+  `ProofResolution`, `ProofResolutionReason`, `ProofRequirementKind`, `ProofEvidenceKind`,
+  `ProofPrerequisiteStatus`, `ProofDiagnostic`, `ProofRequirementDescriptor` and its typed records,
+  `ProofStimulusState`, `ProofStimulusResolution`, `ProofEvaluationState`,
+  `ProofEvaluationResolution`, `ProofInteractionProvenance` and its `Role`,
+  `ProofObligationResolution`, `ProofReport`, and `ProofResult`.
 - Topology inspection: `CompatibilityResult`, `ConnectionDescriptor`, `ConnectionId`,
   `ConnectionRef`, `PortDirection`, `PortRef`.
 
@@ -227,8 +239,10 @@ Only these core types remain Java-public without compatibility support:
 | `ComponentRuntime.publishBindingsTo(...)` | Transfers already driver-owned bindings into the non-constructible environment boundary. | No environment/runtime lookup path is exposed. |
 
 `EnvironmentRuntime`, its factory, assembly, lifecycle, inspector, component supervisor, connection
-registry, proof registry, journal store, classified diagnostics capture, emitter, and failure accumulator are
-package-private. `EnvironmentTopology.runtimeComponents()` is package-private; public topology
+registry, proof registry, proof execution coordinator, protocol-neutral outcome evaluator,
+proof evidence-window watermark tracker, proof current-state index, journal store, classified
+diagnostics capture, emitter, and failure accumulator are package-private.
+`EnvironmentTopology.runtimeComponents()` is package-private; public topology
 inspection returns only `List<Component>` and logical connections. `EnvironmentLogging` exposes
 only `logs()` and `defaults()` plus value methods; threshold lookup and `validateAgainst(...)` are
 package-private. Its builder is the supported mutation boundary.

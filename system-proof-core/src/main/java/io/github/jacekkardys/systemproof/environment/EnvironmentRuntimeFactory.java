@@ -33,9 +33,11 @@ final class EnvironmentRuntimeFactory {
 
         ScenarioJournal journal = new ScenarioJournal();
         JournalRenderer renderer = new JournalRenderer();
+        ProofExecutionCoordinator proofs = new ProofExecutionCoordinator();
         EnvironmentEventPublisher events = new EnvironmentEventPublisher(
             journal,
-            new JournalSlf4jEmitter(logging, renderer)
+            new JournalSlf4jEmitter(logging, renderer),
+            proofs
         );
         ProofSubjectRegistry proofSubjects = new ProofSubjectRegistry(events);
         SemanticControlCapabilityRegistry controlCapabilities =
@@ -43,7 +45,8 @@ final class EnvironmentRuntimeFactory {
         SemanticControlCoordinator controls = new SemanticControlCoordinator(
             events,
             proofSubjects,
-            controlCapabilities
+            controlCapabilities,
+            proofs
         );
         RuntimeConnectionRegistry connections = new RuntimeConnectionRegistry(
             topology.connections(),
@@ -51,8 +54,10 @@ final class EnvironmentRuntimeFactory {
             routing,
             controls,
             proofSubjects,
-            controlCapabilities
+            controlCapabilities,
+            proofs
         );
+        proofs.bind(proofSubjects, controls, connections);
         RuntimeBindings bindings = new RuntimeBindings(connections);
         RuntimeDiagnostics diagnostics = new RuntimeDiagnostics(journal, renderer);
         EnvironmentLifecycle lifecycle = new EnvironmentLifecycle(events);
@@ -71,6 +76,7 @@ final class EnvironmentRuntimeFactory {
             componentSupervisor,
             connections,
             controls,
+            proofs,
             proofSubjects,
             events,
             inspector
@@ -80,7 +86,8 @@ final class EnvironmentRuntimeFactory {
             execution,
             componentSupervisor,
             inspector,
-            controls
+            controls,
+            proofs
         );
     }
 
@@ -88,13 +95,15 @@ final class EnvironmentRuntimeFactory {
         EnvironmentExecution execution,
         ComponentRuntimeSupervisor components,
         EnvironmentInspector inspector,
-        SemanticControlCoordinator controls
+        SemanticControlCoordinator controls,
+        ProofExecutionCoordinator proofs
     ) {
         Assembly {
             Objects.requireNonNull(execution, "execution must not be null");
             Objects.requireNonNull(components, "components must not be null");
             Objects.requireNonNull(inspector, "inspector must not be null");
             Objects.requireNonNull(controls, "controls must not be null");
+            Objects.requireNonNull(proofs, "proofs must not be null");
         }
     }
 }

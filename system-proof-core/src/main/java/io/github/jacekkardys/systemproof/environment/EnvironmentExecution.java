@@ -1,7 +1,9 @@
 package io.github.jacekkardys.systemproof.environment;
 
 import java.util.Objects;
+import java.util.Set;
 import io.github.jacekkardys.systemproof.environment.state.EnvironmentState;
+import io.github.jacekkardys.systemproof.topology.ConnectionId;
 
 /** Coordinates the environment lifecycle and cleanup of its execution subsystems. */
 final class EnvironmentExecution {
@@ -9,6 +11,7 @@ final class EnvironmentExecution {
     private final ComponentRuntimeSupervisor components;
     private final RuntimeConnectionRegistry connections;
     private final SemanticControlCoordinator controls;
+    private final ProofExecutionCoordinator proofs;
     private final ProofSubjectRegistry proofSubjects;
     private final EnvironmentEventPublisher events;
     private final EnvironmentInspector inspector;
@@ -18,6 +21,7 @@ final class EnvironmentExecution {
         ComponentRuntimeSupervisor components,
         RuntimeConnectionRegistry connections,
         SemanticControlCoordinator controls,
+        ProofExecutionCoordinator proofs,
         ProofSubjectRegistry proofSubjects,
         EnvironmentEventPublisher events,
         EnvironmentInspector inspector
@@ -26,6 +30,7 @@ final class EnvironmentExecution {
         this.components = Objects.requireNonNull(components, "components must not be null");
         this.connections = Objects.requireNonNull(connections, "connections must not be null");
         this.controls = Objects.requireNonNull(controls, "controls must not be null");
+        this.proofs = Objects.requireNonNull(proofs, "proofs must not be null");
         this.proofSubjects = Objects.requireNonNull(
             proofSubjects,
             "proofSubjects must not be null"
@@ -82,10 +87,23 @@ final class EnvironmentExecution {
         return connections.observationRefreshBatch();
     }
 
+    RuntimeConnectionRegistry.ObservationBatch observationRefreshBatch(
+        Set<ConnectionId> connectionIds
+    ) {
+        return connections.observationRefreshBatch(connectionIds);
+    }
+
     void applyObservationRefresh(
         RuntimeConnectionRegistry.ObservationResults observationResults
     ) {
         connections.applyObservationRefresh(observationResults);
+    }
+
+    void applyObservationRefresh(
+        RuntimeConnectionRegistry.ObservationResults observationResults,
+        Set<ConnectionId> connectionIds
+    ) {
+        connections.applyObservationRefresh(observationResults, connectionIds);
     }
 
     void close() {
@@ -116,14 +134,18 @@ final class EnvironmentExecution {
     }
 
     private void closeDeclaredExecution() {
-        Throwable failure = completeControls();
+        Throwable failure = completeProofEvaluation();
+        failure = EnvironmentRuntimeFailures.accumulate(
+            failure,
+            completeControls()
+        );
         failure = EnvironmentRuntimeFailures.accumulate(
             failure,
             attempt(connections::stopRemaining)
         );
         failure = EnvironmentRuntimeFailures.accumulate(
             failure,
-            completeProofExecution()
+            completeProofSubjects()
         );
         lifecycle.markStopped();
         if (failure != null) {
@@ -143,7 +165,11 @@ final class EnvironmentExecution {
     }
 
     private Throwable cleanup() {
-        Throwable firstFailure = completeControls();
+        Throwable firstFailure = completeProofEvaluation();
+        firstFailure = EnvironmentRuntimeFailures.accumulate(
+            firstFailure,
+            completeControls()
+        );
         firstFailure = EnvironmentRuntimeFailures.accumulate(
             firstFailure,
             attempt(components::stopStartedComponents)
@@ -156,18 +182,19 @@ final class EnvironmentExecution {
             firstFailure,
             attempt(components::closeSharedResources)
         );
-        return EnvironmentRuntimeFailures.accumulate(
-            firstFailure,
-            completeProofExecution()
-        );
+        return EnvironmentRuntimeFailures.accumulate(firstFailure, completeProofSubjects());
     }
 
-    private Throwable completeProofExecution() {
+    private Throwable completeProofEvaluation() {
+        return proofs.completeExecution();
+    }
+
+    private Throwable completeProofSubjects() {
         try {
             proofSubjects.completeExecution();
             return null;
-        } catch (RuntimeException | Error failure) {
-            return failure;
+        } catch (RuntimeException | Error completionFailure) {
+            return completionFailure;
         }
     }
 

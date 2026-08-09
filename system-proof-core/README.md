@@ -46,6 +46,10 @@ Public contracts:
 - `SemanticControls`, `SemanticInteractionSelector<T>`, `SemanticHold`, and
   `SemanticPredecessorGuard`: one environment-owned control boundary for deterministic holds and
   exact subject-scoped predecessor enforcement.
+- `ProofPlan`, `Proofs`, `ProofExecution`, `ProofResult`, and their closed stimulus, evaluation,
+  outcome, and obligation-resolution values: one bounded frozen declaration, explicit
+  activation/stimulus/evaluation sequence, and a detached fail-closed result for one environment
+  execution.
 - `EnvironmentLogging`, top-level `EnvironmentLoggingBuilder`, `EnvironmentDiagnostics`, and
   `EnvironmentStartException`: logging configuration, rendered journal views, and failure reporting.
 
@@ -56,6 +60,54 @@ including nested types.
 Core validates component ID uniqueness, port ownership and direction, contract/interaction/protocol
 compatibility, exactly one provider per required port, logging references, dependency cycles, and
 complete provided-port materialization.
+
+## Frozen proof-plan execution
+
+`Environment.proofs()` owns at most one valid proof execution. A plan names one opaque primary
+subject and declares every required prerequisite, routed observation profile, typed correlation,
+prepared hold/guard terminal state, evidence item, and guard-owned causal relation. Declarations
+are ordered, immutable after `build()`, capped at 256 items, and contain no payload, predicate,
+adapter, throwable, or protocol object.
+
+Activation validates exact environment ownership and static profile/schema/capability coverage,
+samples fresh observation state, and arms all prepared controls before the evidence window becomes
+`ACTIVE`. An execution may declare at most 256 semantic controls; this bound also caps public
+completion delivery. Partial arming is rolled back without forwarding protected traffic. Unsupported runtime
+coverage completes `INCONCLUSIVE`; malformed plans throw `ProofConfigurationException`; internal
+activation failure completes `ERROR`. In every pre-stimulus outcome the stimulus callback is not
+invoked. The observation owner records each allocated `InteractionRef` before journal publication
+and proof callbacks. While the control activation transaction still owns its monitor, it captures
+one per-session/direction ordinal watermark and retains the observation recording boundary until
+the proof is `ACTIVE`. Only later observation identities belong to the proof window; callback
+arrival order can neither admit pre-boundary traffic nor discard post-boundary traffic.
+
+The environment consumes only framework-owned typed facts into a bounded current-state index. It
+does not scan or duplicate the scenario journal and never infers correlation or causality from
+journal sequence, time, await order, or map iteration. Required observation remains an obligation
+for the whole evidence window, including sticky intermediate failure. Correlation remains owned by
+the existing subject registry, and causal relations remain owned by predecessor-guard facts.
+
+The terminal outcome has one linearization point. All typed facts emitted by one authoritative
+permit decision are applied as one bounded batch before the first terminal snapshot is frozen;
+independent later facts remain secondary. `PROVED` requires every item to be explicitly
+`SATISFIED`; an explicit guard counterexample yields `VIOLATED`; missing, ambiguous, unsupported,
+unreached, or timed-out coverage yields `INCONCLUSIVE`; trust loss yields `ERROR`. Later facts do
+not change the primary outcome. The deadline crosses the same control/observation/correlation
+boundary as explicit evaluation and always yields a typed `INCONCLUSIVE` evaluation gap unless an
+earlier violation or error already won. Required observation refresh is single-flight and bounded
+by that deadline; teardown never waits for a blocked provider, and a late refresh is discarded.
+Every semantic-control transition separates deterministic internal actions from user-visible stage
+completion. Each committed public root is accepted by an environment-owned dispatcher as a
+separate daemon virtual-thread task; at most 768 roots exist for the 256-control lifetime bound.
+There is no delivery queue and callback execution order is unspecified. A publication gate keeps
+terminal callbacks behind immutable result publication, while close waits only for submission and
+state handoff, never for user code. Blocking or failing dependents therefore cannot hold protocol
+decisions, stimulus, proof finalization, unrelated roots, or teardown. At most 32 later
+type-only diagnostics may be retained, and repeated evaluation/result access returns the same
+immutable object. An unfinished active execution makes environment teardown fail. The deterministic
+compact report is capped at 64 KiB and never renders payloads, evidence bytes, native references,
+exception messages, or arbitrary opaque-reference `toString()` output. See
+[ADR 0011](../docs/adr/0011-frozen-proof-plan-evaluation.md).
 
 ## Secret-safe diagnostics
 
@@ -282,6 +334,10 @@ and unique, the hold fails with `CORRELATION_INVALIDATED`, requests `CLOSE_SESSI
 held byte, and completes release exceptionally. A publication after that point cannot revoke an
 already authorized release.
 
+A matching interaction is only `HELD_INTERACTION` after `REACHED_HELD`. Selector failure or overlap
+between active holds before reach emits no held reference: the control resolves with the exact
+pre-reach failure reason, hold evidence remains `MISSING`, and `reached()` completes exceptionally.
+
 Semantic predecessor guards use that same typed selector and the same coordinator synchronization
 boundary as holds. A guard is armed before stimulus with an exact subject, predecessor selector,
 `CONFIRMED` or `FORWARDED` boundary, successor selector, and positive maximum duration. `CONFIRMED`
@@ -296,6 +352,9 @@ tombstones. Cancellation, route failure, REQUIRED observation failure, write out
 share the same total order. A later cleanup failure cannot replace a violation and is retained only
 as a safe typed suppressed diagnostic. Missing or ambiguous native correlation does not select a
 guard, and exact subject/session validation isolates concurrent subjects and reconnects.
+An interaction processed while the guard is `ARMED` cannot establish both roles: if both selectors
+match it, the coordinator records an early-successor violation with successor-only provenance.
+Distinct predecessor and successor identities remain valid even on the same connection.
 
 The selector exposes typed codecs and matching but not `EvidenceSnapshot`; snapshot decoding,
 registry state, coordinator locks, and gateway permits remain internal. Guard journal events retain

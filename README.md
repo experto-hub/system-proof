@@ -49,7 +49,11 @@ with HTTP and SMPP through one canonical SMS fingerprint and attributes one proo
 transaction as recorded in [`ADR 0008`](docs/adr/0008-aml-subject-transaction-attribution.md).
 Environment-owned semantic predecessor guards then enforce the two exact cross-connection
 relations recorded in [`ADR 0009`](docs/adr/0009-semantic-predecessor-guards.md). They enforce
-ordering but do not compute a proof outcome or claim the final T1 proof.
+ordering. Frozen proof plans can now require those typed relations together with exact observation,
+correlation, control, evidence, and prerequisite coverage and evaluate one controlled execution to
+`PROVED`, `VIOLATED`, `INCONCLUSIVE`, or `ERROR`. The lifecycle, fail-closed precedence, and report
+boundary are recorded in [`ADR 0011`](docs/adr/0011-frozen-proof-plan-evaluation.md). This is the
+evaluation seam required by the later final T1 scenario; it does not itself claim that scenario.
 
 The HTTP adapter is likewise a characterized, fail-closed subset rather than a general HTTP
 proxy. Its framing limits, tri-state `ACK/Jasmin` acknowledgement contract, local exchange
@@ -91,6 +95,59 @@ closed topology before startup, starts dependencies in order, injects the exact 
 supports injection into the test, `@BeforeEach`, and `@AfterEach` method parameters, and closes
 partial or complete startup in reverse order. An optional `title` becomes the test display name;
 `title` and `description` are also published as JUnit report entries.
+
+## Frozen proof evaluation
+
+A scenario first creates its subject and declares any semantic controls. It then freezes the
+complete plan, activates it, runs stimulus only after successful activation, and evaluates once:
+
+```java
+ProofPlan plan = ProofPlan.builder(
+    "commit-before-callback",
+    "Commit succeeds before the positive callback",
+    subject,
+    Duration.ofSeconds(30)
+).prerequisite(
+    "database-durability",
+    environment.proofs().satisfiedPrerequisite()
+).observation(
+    "callback-observation",
+    callbackConnection,
+    callbackProfile
+).correlation(
+    "callback-correlation",
+    callbackConnection,
+    correlationKey,
+    callbackNativeSchema
+).control(
+    "commit-before-callback-guard",
+    guard,
+    SemanticPredecessorGuardState.SATISFIED
+).causalRelation(
+    "commit-before-callback-relation",
+    guard
+).build();
+
+ProofExecution execution = environment.proofs().activate(plan);
+execution.runStimulus(() -> invokeSystemUnderTest());
+ProofResult result = execution.evaluate().require(ProofOutcome.PROVED);
+```
+
+This is an explicit pre-1.0 API, not a final proof DSL. `PROVED` requires one successfully
+completed stimulus and every declared item to be `SATISFIED`; evaluating before or during the
+stimulus is rejected. Silence, timeout, missing or ambiguous correlation, unsupported coverage,
+and an unreached control remain inconclusive. Framework trust failures are errors. An authoritative
+early-successor guard violation remains a violation even if cleanup later fails. The compact result
+report is detached, bounded, deterministic, and type-only for failures. Its resolutions retain safe
+typed requirement descriptors and role-aware detached interaction provenance (`CORRELATION`,
+`HOLD`, `PREDECESSOR`, or `SUCCESSOR`). Public semantic-control roots are delivered independently
+on bounded daemon tasks after mandatory framework actions; arbitrary dependent execution order is
+not a contract. Evidence belongs to an execution only when its observation-
+allocated interaction identity is after the atomically captured activation watermark; delayed
+callback delivery cannot move older traffic into the proof window, and post-watermark recording
+cannot publish into a separate pre-`ACTIVE` gap. The proof deadline also bounds
+required-provider refresh and is reported as a typed evaluation gap, never as successful proof.
+The full journal and troubleshooting diagnostics remain separate.
 
 ## Component declarations
 
@@ -335,7 +392,10 @@ gateway session. Their directions may differ; equal native-reference bytes on an
 or session never join. The two facts need not share one `InteractionRef`. Its codecs, predicate,
 and extractor run synchronously and therefore must be pure, fast, non-blocking, and side-effect
 free. A selector exception or overlapping matching holds fails closed; missing or ambiguous
-subject correlation does not match.
+subject correlation does not match. A selector candidate becomes held evidence only after the
+coordinator reaches `REACHED_HELD`. Selector failure or overlap between active holds before that
+state retains no `HOLD` provenance, leaves `HELD_INTERACTION` missing, completes `reached()`
+exceptionally, and closes the affected session.
 
 ## Semantic predecessor guards
 
@@ -362,7 +422,10 @@ position establishes neither boundary.
 The shared coordinator is the one linearization point. Predecessor first authorizes the successor;
 after successful successor forwarding the guard records an exact satisfied relation. Successor
 first records a terminal violation, returns `CLOSE_SESSION`, and forwards zero successor bytes. It
-does not wait for or accept a later predecessor. Missing or ambiguous subject/native-reference
+does not wait for or accept a later predecessor. Matching is evaluated against the guard state at
+the start of the current interaction: if an `ARMED` guard's predecessor and successor selectors
+both match that one interaction, it is an early successor with successor-only provenance, never a
+self-causal relation. Missing or ambiguous subject/native-reference
 correlation does not match, and other subjects remain independent. The complete state, lifecycle,
 journal, and safety contract is in [`ADR 0009`](docs/adr/0009-semantic-predecessor-guards.md).
 
