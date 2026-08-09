@@ -18,6 +18,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import io.github.jacekkardys.systemproof.control.SemanticHoldFailure;
@@ -71,7 +72,8 @@ import io.github.jacekkardys.systemproof.topology.ConnectionId;
  * mutation run outside this monitor. One per-thread authoritative-operation token retains journal
  * facts and direct proof intents in call order; only that detached complete operation enters proof
  * state. Completion delivery runs after every framework monitor and immutable-result gate is
- * released.
+ * released. A selected outcome owns one waitable finalization-readiness handoff; accessors wait on
+ * it outside framework monitors and then compete for the single finalization claim.
  */
 final class ProofExecutionCoordinator
     implements ProofFactObserver, ProofObservationListener {
@@ -423,6 +425,14 @@ final class ProofExecutionCoordinator
 
     @Override
     public <T> T factBatch(Supplier<T> action) {
+        return factBatch(action, null);
+    }
+
+    @Override
+    public <T> T factBatch(
+        Supplier<T> action,
+        Consumer<ProofFactObserver.FinalizationHandoff> handoffConsumer
+    ) {
         action = Objects.requireNonNull(action, "action must not be null");
         if (activeOperation.get() != null) {
             return action.get();
@@ -430,12 +440,13 @@ final class ProofExecutionCoordinator
 
         boundaryObserver.beforeAuthoritativeOperationBoundary();
         AuthoritativeOperationToken operation = null;
+        T result = null;
         try {
             synchronized (authoritativeOperationBoundary) {
                 operation = openAuthoritativeOperation();
                 activeOperation.set(operation);
                 try {
-                    return action.get();
+                    result = action.get();
                 } finally {
                     activeOperation.remove();
                     try {
@@ -445,16 +456,26 @@ final class ProofExecutionCoordinator
                     }
                 }
             }
+            return result;
         } finally {
-            ExecutionRecord selected = operation == null
+            AuthoritativeOutcomeBoundary selected = operation == null
                 ? null
-                : operation.selectedOutcome;
+                : operation.selectedOutcomeBoundary;
             if (selected != null) {
                 try {
                     boundaryObserver.authoritativeOutcomeSelectedBeforeFinalization();
                 } finally {
-                    synchronized (this) {
-                        selected.authoritativeOutcomeBoundaryPending = false;
+                    if (handoffConsumer != null) {
+                        try {
+                            handoffConsumer.accept(selected);
+                        } catch (RuntimeException | Error handoffFailure) {
+                            selected.release();
+                            finalizePending(selected.record);
+                            throw handoffFailure;
+                        }
+                    } else {
+                        selected.release();
+                        finalizePending(selected.record);
                     }
                 }
             }
@@ -507,8 +528,10 @@ final class ProofExecutionCoordinator
                 }
             } finally {
                 if (batchOpened && completeFactBatchLocked(record)) {
-                    record.authoritativeOutcomeBoundaryPending = true;
-                    operation.selectedOutcome = record;
+                    AuthoritativeOutcomeBoundary outcomeBoundary =
+                        new AuthoritativeOutcomeBoundary(record);
+                    record.authoritativeOutcomeBoundary = outcomeBoundary;
+                    operation.selectedOutcomeBoundary = outcomeBoundary;
                 }
             }
         }
@@ -2059,30 +2082,46 @@ final class ProofExecutionCoordinator
     }
 
     private void finalizePending(ExecutionRecord record) {
-        boolean owner = false;
-        synchronized (this) {
-            if (record.outcome == null || record.finalizationComplete) {
-                return;
+        boolean owner;
+        while (true) {
+            AuthoritativeOutcomeBoundary boundary;
+            synchronized (this) {
+                if (record.outcome == null || record.finalizationComplete) {
+                    return;
+                }
+                if (record.deadlineInstalling) {
+                    return;
+                }
+                boundary = record.authoritativeOutcomeBoundary;
+                if (boundary == null || boundary.isReady()) {
+                    if (!record.finalizing) {
+                        record.finalizing = true;
+                        record.finalizationOwner = Thread.currentThread();
+                        owner = true;
+                    } else if (record.finalizationOwner == Thread.currentThread()) {
+                        return;
+                    } else {
+                        owner = false;
+                    }
+                    break;
+                }
             }
-            if (record.deadlineInstalling) {
-                return;
-            }
-            if (record.authoritativeOutcomeBoundaryPending) {
-                return;
-            }
-            if (!record.finalizing) {
-                record.finalizing = true;
-                record.finalizationOwner = Thread.currentThread();
-                owner = true;
-            } else if (record.finalizationOwner == Thread.currentThread()) {
-                return;
-            }
+            boundary.awaitReady();
         }
         if (!owner) {
             awaitFinalization(record);
             return;
         }
 
+        try {
+            finalizeOwned(record);
+        } catch (RuntimeException | Error failure) {
+            failFinalization(record, failure);
+            throw failure;
+        }
+    }
+
+    private void finalizeOwned(ExecutionRecord record) {
         DeadlineTask deadline;
         ActivationControls activationControls;
         synchronized (this) {
@@ -2120,43 +2159,58 @@ final class ProofExecutionCoordinator
 
         ProofResult frozen;
         SemanticControlCoordinator.CompletionGate publicationGate = controls.newCompletionGate();
-        RuntimeException injectedConstructionFailure =
-            boundaryObserver.resultConstructionFailure();
-        synchronized (this) {
-            try {
-                if (injectedConstructionFailure != null) {
-                    throw injectedConstructionFailure;
+        try {
+            RuntimeException injectedConstructionFailure =
+                boundaryObserver.resultConstructionFailure();
+            synchronized (this) {
+                try {
+                    if (injectedConstructionFailure != null) {
+                        throw injectedConstructionFailure;
+                    }
+                    frozen = freezeResultLocked(record);
+                } catch (RuntimeException constructionFailure) {
+                    frozen = recoverResultConstructionFailureLocked(
+                        record,
+                        constructionFailure
+                    );
                 }
-                frozen = freezeResultLocked(record);
-            } catch (RuntimeException constructionFailure) {
-                frozen = recoverResultConstructionFailureLocked(
-                    record,
-                    constructionFailure
+                record.result = frozen;
+                record.state = ProofExecutionState.COMPLETED;
+            }
+            try {
+                boundaryObserver.resultCreatedBeforeCompletionSubmission();
+            } catch (RuntimeException | Error ignored) {
+                rethrowFatal(ignored);
+                // A package-private boundary observer cannot poison immutable result publication.
+            }
+            if (controlNotifications != null) {
+                controls.submitPreparedPublicCompletions(
+                    controlNotifications,
+                    publicationGate
                 );
             }
-            record.result = frozen;
-            record.state = ProofExecutionState.COMPLETED;
+            record.resultReady.complete(frozen);
+            synchronized (this) {
+                record.finalizationComplete = true;
+                record.finalizing = false;
+                record.finalizationOwner = null;
+                record.authoritativeOutcomeBoundary = null;
+            }
+            record.finalizationReady.complete(null);
+        } finally {
+            publicationGate.open();
         }
-        try {
-            boundaryObserver.resultCreatedBeforeCompletionSubmission();
-        } catch (RuntimeException | Error ignored) {
-            rethrowFatal(ignored);
-            // A package-private boundary observer cannot poison immutable result publication.
-        }
-        if (controlNotifications != null) {
-            controls.submitPreparedPublicCompletions(
-                controlNotifications,
-                publicationGate
-            );
-        }
-        record.resultReady.complete(frozen);
-        publicationGate.open();
+    }
+
+    private void failFinalization(ExecutionRecord record, Throwable failure) {
         synchronized (this) {
             record.finalizationComplete = true;
             record.finalizing = false;
             record.finalizationOwner = null;
+            record.authoritativeOutcomeBoundary = null;
         }
-        record.finalizationReady.complete(null);
+        record.resultReady.completeExceptionally(failure);
+        record.finalizationReady.completeExceptionally(failure);
     }
 
     private static ProofResult freezeResultLocked(ExecutionRecord record) {
@@ -2456,15 +2510,18 @@ final class ProofExecutionCoordinator
             && record.primaryResolutions.stream().allMatch(
                 ProofExecutionCoordinator::isStrictResolutionSnapshot
             );
-        ProofResult ready = record.resultReady.getNow(null);
+        boolean resultReadyCompletedNormally = record.resultReady.isDone()
+            && !record.resultReady.isCompletedExceptionally()
+            && !record.resultReady.isCancelled();
+        ProofResult ready = resultReadyCompletedNormally
+            ? record.resultReady.getNow(null)
+            : null;
         return new PublicationInvariant(
             record.outcome != null,
             record.plan.requirements().size(),
             primaryResolutionCount,
             strictPrimaryResolutions,
-            record.resultReady.isDone()
-                && !record.resultReady.isCompletedExceptionally()
-                && !record.resultReady.isCancelled(),
+            resultReadyCompletedNormally,
             ready != null && ready == record.result,
             record.finalizationReady.isDone()
                 && !record.finalizationReady.isCompletedExceptionally()
@@ -2472,7 +2529,7 @@ final class ProofExecutionCoordinator
             record.finalizationComplete,
             record.finalizing,
             record.finalizationOwner != null,
-            record.authoritativeOutcomeBoundaryPending,
+            record.authoritativeOutcomeBoundary != null,
             authoritativeOperationOwner != null,
             record.factBatchActive,
             record.pendingCompletion != null,
@@ -2759,7 +2816,7 @@ final class ProofExecutionCoordinator
         private boolean finalizing;
         private boolean finalizationComplete;
         private boolean factBatchActive;
-        private boolean authoritativeOutcomeBoundaryPending;
+        private AuthoritativeOutcomeBoundary authoritativeOutcomeBoundary;
         private int resultConstructionRecoveryCount;
         private PendingCompletion pendingCompletion;
         private boolean activationReached;
@@ -2839,7 +2896,7 @@ final class ProofExecutionCoordinator
     private static final class AuthoritativeOperationToken {
         private final Thread owner;
         private final List<AuthoritativeOperationIntent> intents = new ArrayList<>();
-        private ExecutionRecord selectedOutcome;
+        private AuthoritativeOutcomeBoundary selectedOutcomeBoundary;
 
         private AuthoritativeOperationToken(Thread owner) {
             this.owner = Objects.requireNonNull(owner, "owner must not be null");
@@ -2852,6 +2909,29 @@ final class ProofExecutionCoordinator
                 );
             }
             intents.add(Objects.requireNonNull(intent, "intent must not be null"));
+        }
+    }
+
+    private static final class AuthoritativeOutcomeBoundary
+        implements ProofFactObserver.FinalizationHandoff {
+        private final ExecutionRecord record;
+        private final CompletableFuture<Void> ready = new CompletableFuture<>();
+
+        private AuthoritativeOutcomeBoundary(ExecutionRecord record) {
+            this.record = Objects.requireNonNull(record, "record must not be null");
+        }
+
+        @Override
+        public void release() {
+            ready.complete(null);
+        }
+
+        private boolean isReady() {
+            return ready.isDone();
+        }
+
+        private void awaitReady() {
+            ready.join();
         }
     }
 

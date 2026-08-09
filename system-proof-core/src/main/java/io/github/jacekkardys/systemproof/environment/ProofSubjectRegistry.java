@@ -24,9 +24,11 @@ import io.github.jacekkardys.systemproof.topology.ConnectionId;
  * Environment-owned linearizable subject registry and current-state journal index.
  *
  * <p>Mutating publications enter the proof fact-batch boundary before this registry monitor.
- * They release the registry before proof evaluation receives the complete fact batch. The global
- * order is semantic controls, authoritative-operation boundary, proof subjects, journal
- * publication, proof evaluation; completion delivery runs only after all of them are released.
+ * A successful journal append commits the matching registry mutation and typed proof fact before
+ * best-effort diagnostic emission. The registry is released before proof evaluation receives the
+ * complete fact batch. The global order is semantic controls, authoritative-operation boundary,
+ * proof subjects, journal publication, proof evaluation; completion delivery runs only after all
+ * of them are released.
  */
 final class ProofSubjectRegistry implements ProofSubjects {
     private static final long FIRST_SUBJECT_VALUE = 1L;
@@ -49,8 +51,13 @@ final class ProofSubjectRegistry implements ProofSubjects {
             synchronized (this) {
                 requireAccepting("create proof subjects");
                 ProofSubjectRef subject = createReference();
-                events.proofSubjectCreated(subject);
-                subjects.put(subject, new SubjectState());
+                events.proofSubjectCreated(
+                    subject,
+                    () -> {
+                        subjects.put(subject, new SubjectState());
+                        advanceReference();
+                    }
+                );
                 return subject;
             }
         });
@@ -77,24 +84,25 @@ final class ProofSubjectRegistry implements ProofSubjects {
 
         Set<ProofSubjectRef> existingSubjects = subjectsByKey.get(key);
         boolean sharedKey = existingSubjects != null && !existingSubjects.isEmpty();
-        events.proofSubjectArmed(subject, key, sharedKey);
-
-        if (sharedKey) {
-            for (ProofSubjectRef existingSubject : existingSubjects) {
-                SubjectState existingState = requireSubject(existingSubject);
-                existingState.resolutions.get(key).replaceAll(
-                    (schema, resolution) -> Ambiguous.INSTANCE
-                );
-                existingState.exactResolutions.replaceAll(
-                    (exact, resolution) -> exact.key().equals(armedKey)
-                        ? Ambiguous.INSTANCE
-                        : resolution
-                );
+        Set<ProofSubjectRef> sharedSubjects = existingSubjects;
+        events.proofSubjectArmed(subject, key, sharedKey, () -> {
+            if (sharedKey) {
+                for (ProofSubjectRef existingSubject : sharedSubjects) {
+                    SubjectState existingState = requireSubject(existingSubject);
+                    existingState.resolutions.get(armedKey).replaceAll(
+                        (schema, resolution) -> Ambiguous.INSTANCE
+                    );
+                    existingState.exactResolutions.replaceAll(
+                        (exact, resolution) -> exact.key().equals(armedKey)
+                            ? Ambiguous.INSTANCE
+                            : resolution
+                    );
+                }
             }
-        }
-        subjectState.resolutions.put(key, new HashMap<>());
-        subjectsByKey.computeIfAbsent(key, ignored -> new HashSet<>())
-            .add(subject);
+            subjectState.resolutions.put(armedKey, new HashMap<>());
+            subjectsByKey.computeIfAbsent(armedKey, ignored -> new HashSet<>())
+                .add(subject);
+        });
     }
 
     @Override
@@ -175,7 +183,8 @@ final class ProofSubjectRegistry implements ProofSubjects {
                 key,
                 interactionRef,
                 nativeReference,
-                CorrelationCardinality.MISSING
+                CorrelationCardinality.MISSING,
+                () -> {}
             );
             return;
         }
@@ -185,7 +194,8 @@ final class ProofSubjectRegistry implements ProofSubjects {
                 key,
                 interactionRef,
                 nativeReference,
-                CorrelationCardinality.AMBIGUOUS
+                CorrelationCardinality.AMBIGUOUS,
+                () -> {}
             );
             return;
         }
@@ -206,15 +216,12 @@ final class ProofSubjectRegistry implements ProofSubjects {
             exactCorrelation,
             Missing.INSTANCE
         );
-        if (!(exactCurrent instanceof Unique exactUnique
-            && exactUnique.sameCandidate(interactionRef, nativeReference))) {
-            subjectState.exactResolutions.put(
-                exactCorrelation,
-                exactCurrent == Missing.INSTANCE
+        Resolution exactNext = exactCurrent instanceof Unique exactUnique
+            && exactUnique.sameCandidate(interactionRef, nativeReference)
+                ? exactCurrent
+                : exactCurrent == Missing.INSTANCE
                     ? new Unique(interactionRef, nativeReference)
-                    : Ambiguous.INSTANCE
-            );
-        }
+                    : Ambiguous.INSTANCE;
         Resolution current = bySchema.getOrDefault(
             nativeReferenceSchema,
             Missing.INSTANCE
@@ -227,18 +234,22 @@ final class ProofSubjectRegistry implements ProofSubjects {
         CorrelationCardinality cardinality = current == Missing.INSTANCE
             ? CorrelationCardinality.UNIQUE
             : CorrelationCardinality.AMBIGUOUS;
+        InteractionRef committedInteraction = interactionRef;
         events.correlationCandidate(
             Optional.of(subject),
             key,
-            interactionRef,
+            committedInteraction,
             nativeReference,
-            cardinality
-        );
-        bySchema.put(
-            nativeReferenceSchema,
-            cardinality == CorrelationCardinality.UNIQUE
-                ? new Unique(interactionRef, nativeReference)
-                : Ambiguous.INSTANCE
+            cardinality,
+            () -> {
+                subjectState.exactResolutions.put(exactCorrelation, exactNext);
+                bySchema.put(
+                    nativeReferenceSchema,
+                    cardinality == CorrelationCardinality.UNIQUE
+                        ? new Unique(committedInteraction, nativeReference)
+                        : Ambiguous.INSTANCE
+                );
+            }
         );
     }
 
@@ -441,11 +452,13 @@ final class ProofSubjectRegistry implements ProofSubjects {
                 "Proof-subject identity space is exhausted for this environment execution"
             );
         }
-        ProofSubjectRef reference = new RuntimeProofSubjectRef(owner, nextSubjectValue);
+        return new RuntimeProofSubjectRef(owner, nextSubjectValue);
+    }
+
+    private void advanceReference() {
         nextSubjectValue = nextSubjectValue == Long.MAX_VALUE
             ? Long.MIN_VALUE
             : nextSubjectValue + 1L;
-        return reference;
     }
 
     private SubjectState requireSubject(ProofSubjectRef subject) {

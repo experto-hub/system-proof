@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -164,6 +165,51 @@ class ProofResultPublicationBoundaryTest {
                 .isInstanceOf(InjectedLinkageFailure.class);
             assertThat(ProofExecutionCoordinator.publicationInvariant(execution)
                 .resultConstructionRecoveryCount()).isZero();
+        }
+    }
+
+    @Test
+    void shouldFailReadinessAndClearOwnersAfterAFatalFinalizationExit() {
+        ProofRuntimeHarness.BoundaryHooks hooks = new ProofRuntimeHarness.BoundaryHooks() {
+            @Override
+            public void resultCreatedBeforeCompletionSubmission() {
+                throw new InjectedLinkageFailure();
+            }
+        };
+
+        try (ProofRuntimeHarness harness = ProofRuntimeHarness.startWithBoundaryHooks(hooks)) {
+            ProofExecution execution = harness.activate(ProofPlan.builder(
+                "fatal-finalization-failure",
+                "Fatal finalization failure",
+                harness.subject,
+                DEADLINE
+            ).prerequisite(
+                "prerequisite",
+                harness.prerequisite()
+            ).observation(
+                "observation",
+                harness.connectionId,
+                ProofTestFixture.PROFILE
+            ).build());
+
+            assertThatThrownBy(() ->
+                harness.controls.observationFailed(harness.connectionId)
+            ).isInstanceOf(InjectedLinkageFailure.class);
+            assertThatThrownBy(execution::result)
+                .isInstanceOf(CompletionException.class)
+                .hasCauseInstanceOf(InjectedLinkageFailure.class);
+
+            ProofExecutionCoordinator.PublicationInvariant invariant =
+                ProofExecutionCoordinator.publicationInvariant(execution);
+            assertThat(invariant.resultReadyCompletedNormally()).isFalse();
+            assertThat(invariant.finalizationReadyCompletedNormally()).isFalse();
+            assertThat(invariant.finalizationComplete()).isTrue();
+            assertThat(invariant.finalizing()).isFalse();
+            assertThat(invariant.finalizationOwnerPresent()).isFalse();
+            assertThat(invariant.authoritativeOutcomeBoundaryPending()).isFalse();
+            assertThat(invariant.authoritativeOperationOwnerPresent()).isFalse();
+            assertThat(invariant.factBatchActive()).isFalse();
+            assertThat(invariant.pendingCompletionPresent()).isFalse();
         }
     }
 

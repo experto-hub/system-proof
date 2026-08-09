@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiConsumer;
 import java.util.function.Predicate;
 import io.github.jacekkardys.systemproof.control.SemanticInteractionSelector;
 import io.github.jacekkardys.systemproof.control.SemanticHold;
@@ -63,7 +64,8 @@ final class ProofRuntimeHarness implements AutoCloseable {
             controlTimeouts,
             boundaryHooks,
             null,
-            ScenarioJournal.withoutDiagnosticTime()
+            ScenarioJournal.withoutDiagnosticTime(),
+            null
         );
     }
 
@@ -73,7 +75,9 @@ final class ProofRuntimeHarness implements AutoCloseable {
         SemanticControlCoordinator.TimeoutScheduler controlTimeouts,
         BoundaryHooks boundaryHooks,
         SemanticControlCoordinator.CompletionDispatcher completionDispatcher,
-        ScenarioJournal scenarioJournal
+        ScenarioJournal scenarioJournal,
+        BiConsumer<io.github.jacekkardys.systemproof.journal.LogLevel, String>
+            diagnosticSink
     ) {
         deadlines = java.util.Objects.requireNonNull(
             deadlineScheduler,
@@ -111,6 +115,14 @@ final class ProofRuntimeHarness implements AutoCloseable {
             }
 
             @Override
+            public <T> T factBatch(
+                java.util.function.Supplier<T> action,
+                java.util.function.Consumer<FinalizationHandoff> handoffConsumer
+            ) {
+                return proofs.factBatch(action, handoffConsumer);
+            }
+
+            @Override
             public void journalFailure(Throwable failure) {
                 proofs.journalFailure(failure);
             }
@@ -136,7 +148,9 @@ final class ProofRuntimeHarness implements AutoCloseable {
         };
         events = new EnvironmentEventPublisher(
             journal,
-            new JournalSlf4jEmitter(logging, renderer),
+            diagnosticSink == null
+                ? new JournalSlf4jEmitter(logging, renderer)
+                : new JournalSlf4jEmitter(logging, renderer, diagnosticSink),
             observedFacts
         );
         proofSubjects = new ProofSubjectRegistry(events);
@@ -294,7 +308,8 @@ final class ProofRuntimeHarness implements AutoCloseable {
             new PassiveControlTimeoutScheduler(),
             BoundaryHooks.NONE,
             completionDispatcher,
-            ScenarioJournal.withoutDiagnosticTime()
+            ScenarioJournal.withoutDiagnosticTime(),
+            null
         );
     }
 
@@ -305,7 +320,37 @@ final class ProofRuntimeHarness implements AutoCloseable {
             new PassiveControlTimeoutScheduler(),
             BoundaryHooks.NONE,
             null,
-            journal
+            journal,
+            null
+        );
+    }
+
+    static ProofRuntimeHarness startWithJournalAndBoundaryHooks(
+        ScenarioJournal journal,
+        BoundaryHooks hooks
+    ) {
+        return new ProofRuntimeHarness(
+            new ManualDeadlineScheduler(),
+            ProofOutcomeEvaluator.failClosed(),
+            new PassiveControlTimeoutScheduler(),
+            hooks,
+            null,
+            journal,
+            null
+        );
+    }
+
+    static ProofRuntimeHarness startWithDiagnosticSink(
+        BiConsumer<io.github.jacekkardys.systemproof.journal.LogLevel, String> sink
+    ) {
+        return new ProofRuntimeHarness(
+            new ManualDeadlineScheduler(),
+            ProofOutcomeEvaluator.failClosed(),
+            new PassiveControlTimeoutScheduler(),
+            BoundaryHooks.NONE,
+            null,
+            ScenarioJournal.withoutDiagnosticTime(),
+            sink
         );
     }
 

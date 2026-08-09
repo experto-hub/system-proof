@@ -143,11 +143,11 @@ class ProofAuthoritativeOperationIntentTest {
 
             assertThat(guards.alpha.state()).isEqualTo(
                 committedGuards == 0
-                    ? SemanticPredecessorGuardState.ARMED
+                    ? SemanticPredecessorGuardState.CANCELLED
                     : SemanticPredecessorGuardState.FAILED
             );
             assertThat(guards.beta.state())
-                .isEqualTo(SemanticPredecessorGuardState.ARMED);
+                .isEqualTo(SemanticPredecessorGuardState.CANCELLED);
             ProofResult result = execution.result();
             assertThat(result.outcome()).isEqualTo(ProofOutcome.ERROR);
             assertThat(result.primaryFailure()).get().extracting(value -> value.stage())

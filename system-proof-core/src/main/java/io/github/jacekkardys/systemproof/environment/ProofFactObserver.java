@@ -1,6 +1,7 @@
 package io.github.jacekkardys.systemproof.environment;
 
 import java.util.Objects;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 import io.github.jacekkardys.systemproof.journal.ScenarioEvent;
 
@@ -21,5 +22,29 @@ interface ProofFactObserver {
         return Objects.requireNonNull(action, "action must not be null").get();
     }
 
+    /**
+     * Applies one authoritative operation while handing its terminal-outcome finalization boundary
+     * to a caller that must first execute mandatory internal transition actions and submit gated
+     * public completions. The handoff must be released outside every framework monitor.
+     */
+    default <T> T factBatch(
+        Supplier<T> action,
+        Consumer<FinalizationHandoff> handoffConsumer
+    ) {
+        T result = factBatch(action);
+        Objects.requireNonNull(
+            handoffConsumer,
+            "handoffConsumer must not be null"
+        ).accept(FinalizationHandoff.NONE);
+        return result;
+    }
+
     default void journalFailure(Throwable failure) {}
+
+    @FunctionalInterface
+    interface FinalizationHandoff {
+        FinalizationHandoff NONE = () -> {};
+
+        void release();
+    }
 }

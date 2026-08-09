@@ -171,6 +171,17 @@ resolution. Exceptional exits clear the owner token and batch state before resul
 Unrelated threads do not inherit the token and still linearize independently before or after its
 detached application.
 
+Selecting an outcome at the end of that detached application creates one explicit, waitable
+finalization-readiness handoff. Direct and subject operations release it when their authoritative
+boundary closes and immediately offer finalization ownership. Semantic-control operations retain
+the handoff until mandatory internal transport actions have run and all public completion roots
+have been submitted behind their publication gate. A concurrent `result()` or `evaluate()` that
+finds an unreleased handoff leaves every framework monitor, waits on the handoff, and retries the
+single-owner finalization claim; it never waits on `resultReady` while finalization has no possible
+owner. Normal and exceptional operation exits release the handoff exactly once. A finalization
+failure completes both internal readiness futures exceptionally and clears the owner and boundary
+state, while fatal VM, thread-termination, and linkage errors still propagate.
+
 The global nested lock order is semantic controls, the authoritative-operation boundary, proof
 subjects, journal publication, proof evaluation, and then completion delivery after all framework
 monitors are released. Subject creation, arming, and correlation-candidate publication use the
@@ -180,6 +191,17 @@ action, selector execution, exact current-state correlation validation, journal 
 callback roots, and potentially blocking user code never run under the proof monitor. The proof
 monitor receives only the detached complete batch after the authoritative action. This removes any
 proof-to-subject acquisition while preserving control and journal order.
+
+`ScenarioJournal.append(...)` success is the authoritative durable in-memory commit point for a
+proof-critical event. Subject creation and arming, correlation-candidate publication, semantic-hold
+transitions, and predecessor-guard state, terminal, decision, and suppressed-failure publications
+then commit their matching bounded runtime state and enqueue the same typed proof fact within the
+owning boundary. Rendering and SLF4J emission happen only afterward and are non-authoritative:
+non-fatal renderer or sink failures are contained without another journal event, rollback, stale
+state, or proof-result diagnostic. Fatal errors still propagate after the committed state and fact.
+If the journal append itself fails, no matching runtime transition or proof fact is created; the
+existing type-only journal failure path selects fail-closed `ERROR`. Journal sequence, logging
+thresholds, redaction, and declaration order are unchanged.
 
 `permit(...)` retains the semantic-control monitor and then enters the authoritative-operation
 boundary before evaluating guard or hold selectors. Subject correlation is read only at that point:
@@ -203,7 +225,8 @@ VM, thread termination, and linkage errors are not normalized as proof results.
 
 Every semantic-control
 transition first performs mandatory internal actions, then submits each committed public completion
-root independently behind a publication gate. Proof finalization cancels the deadline, performs
+root independently behind a publication gate, releases its finalization-readiness handoff, and
+offers the single finalization claim. Proof finalization cancels the deadline, performs
 prepared-control transitions, catches cleanup failures, deterministically orders and caps retained
 type-only secondary diagnostics at 32, freezes one result, accepts all finalization-owned completion
 work, publishes that result, and only then opens the gate. Concurrent close waits for this

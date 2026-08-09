@@ -52,6 +52,8 @@ import io.github.jacekkardys.systemproof.topology.ConnectionId;
  * inside that boundary does it execute selectors, take detached subject-correlation snapshots, and
  * commit the transport decision. Subject mutation therefore completes before selection or waits
  * until after the decision; selector code never runs under the subject or proof monitor.
+ * Terminal proof finalization is handed off until mandatory internal permit actions run and public
+ * completion roots are submitted behind the immutable-result publication gate.
  */
 final class SemanticControlCoordinator
     implements SemanticControls, InteractionDecisionCoordinator {
@@ -288,18 +290,26 @@ final class SemanticControlCoordinator
             List<GuardEntry> activatedGuards = new ArrayList<>();
             try {
                 for (HoldEntry entry : holds) {
-                    entry.state = SemanticHoldState.ARMED;
-                    activeHolds.put(entry.ref, entry);
-                    appendHold(entry, SemanticHoldState.ARMED, Optional.empty());
+                    appendHold(
+                        entry,
+                        SemanticHoldState.ARMED,
+                        Optional.empty(),
+                        () -> {
+                            entry.state = SemanticHoldState.ARMED;
+                            activeHolds.put(entry.ref, entry);
+                        }
+                    );
                     activatedHolds.add(entry);
                 }
                 for (GuardEntry entry : preparedGuards) {
-                    entry.state = SemanticPredecessorGuardState.ARMED;
-                    guards.put(entry.ref, entry);
                     appendGuardState(
                         entry,
                         SemanticPredecessorGuardState.ARMED,
-                        Optional.empty()
+                        Optional.empty(),
+                        () -> {
+                            entry.state = SemanticPredecessorGuardState.ARMED;
+                            guards.put(entry.ref, entry);
+                        }
                     );
                     scheduleGuardTimeout(entry, afterTransition);
                     activatedGuards.add(entry);
@@ -432,16 +442,24 @@ final class SemanticControlCoordinator
         RecordedInteraction recorded = interaction;
         AfterTransition afterTransition = new AfterTransition();
         ForwardingPermit permit;
-        synchronized (this) {
-            permit = events.proofFactBatch(() -> {
-                GuardSelections guardSelections = selectGuardsLocked(recorded);
-                HoldMatch holdMatch = guardSelections.closesSession
-                    ? HoldMatch.none()
-                    : selectHoldLocked(recorded);
-                return decideLocked(recorded, guardSelections, holdMatch, afterTransition);
-            });
+        try {
+            synchronized (this) {
+                permit = events.proofFactBatch(() -> {
+                    GuardSelections guardSelections = selectGuardsLocked(recorded);
+                    HoldMatch holdMatch = guardSelections.closesSession
+                        ? HoldMatch.none()
+                        : selectHoldLocked(recorded);
+                    return decideLocked(
+                        recorded,
+                        guardSelections,
+                        holdMatch,
+                        afterTransition
+                    );
+                }, afterTransition::addFinalizationHandoff);
+            }
+        } finally {
+            runAfterTransition(afterTransition);
         }
-        runAfterTransition(afterTransition);
         return permit;
     }
 
@@ -450,30 +468,35 @@ final class SemanticControlCoordinator
         connectionId = Objects.requireNonNull(connectionId, "connectionId must not be null");
         ConnectionId failedConnection = connectionId;
         AfterTransition afterTransition = new AfterTransition();
-        synchronized (this) {
-            authoritativeOperationLocked(() -> {
-                failedRequiredObservationConnections.add(failedConnection);
-                proofObservations.requiredObservationFailed(failedConnection);
-                for (GuardEntry entry : List.copyOf(guards.values())) {
-                    if (guardIsActiveForFailureOrTeardown(entry.state)
-                        && entry.concerns(failedConnection)) {
-                        failGuardLocked(
-                            entry,
-                            SemanticPredecessorGuardFailure.REQUIRED_OBSERVATION_FAILURE,
-                            afterTransition
-                        );
-                    } else if (entry.state == SemanticPredecessorGuardState.VIOLATED
-                        && entry.concerns(failedConnection)) {
-                        appendGuardSuppressedFailure(
-                            entry,
-                            SemanticPredecessorGuardFailure.REQUIRED_OBSERVATION_FAILURE
-                        );
+        try {
+            synchronized (this) {
+                authoritativeOperationLocked(() -> {
+                    failedRequiredObservationConnections.add(failedConnection);
+                    proofObservations.requiredObservationFailed(failedConnection);
+                    for (GuardEntry entry : List.copyOf(guards.values())) {
+                        if (guardIsActiveForFailureOrTeardown(entry.state)
+                            && entry.concerns(failedConnection)) {
+                            failGuardLocked(
+                                entry,
+                                SemanticPredecessorGuardFailure
+                                    .REQUIRED_OBSERVATION_FAILURE,
+                                afterTransition
+                            );
+                        } else if (entry.state == SemanticPredecessorGuardState.VIOLATED
+                            && entry.concerns(failedConnection)) {
+                            appendGuardSuppressedFailure(
+                                entry,
+                                SemanticPredecessorGuardFailure
+                                    .REQUIRED_OBSERVATION_FAILURE
+                            );
+                        }
                     }
-                }
-                return null;
-            });
+                    return null;
+                }, afterTransition);
+            }
+        } finally {
+            runAfterTransition(afterTransition);
         }
-        runAfterTransition(afterTransition);
     }
 
     void withRequiredObservationBoundary(Runnable action) {
@@ -634,30 +657,39 @@ final class SemanticControlCoordinator
             if (selection == null) {
                 continue;
             }
+            InteractionRef successorRef = interaction.interactionRef();
             if (interactionSelection.stateBeforeInteraction
                 == SemanticPredecessorGuardState.ARMED) {
-                entry.successor = interaction.interactionRef();
-                entry.successorSelection = selection;
                 terminalGuardLocked(
                     entry,
                     SemanticPredecessorGuardState.VIOLATED,
                     Optional.empty(),
+                    Optional.ofNullable(entry.predecessor),
+                    Optional.of(successorRef),
+                    () -> {
+                        entry.successor = successorRef;
+                        entry.successorSelection = selection;
+                    },
                     afterTransition
                 );
                 close = true;
                 continue;
             }
-            entry.successor = interaction.interactionRef();
-            entry.successorSelection = selection;
             switch (entry.state) {
                 case PREDECESSOR_SATISFIED -> {
-                    if (interaction.interactionRef().equals(entry.predecessor)) {
-                        entry.predecessor = null;
-                        entry.predecessorSelection = null;
+                    if (successorRef.equals(entry.predecessor)) {
                         terminalGuardLocked(
                             entry,
                             SemanticPredecessorGuardState.VIOLATED,
                             Optional.empty(),
+                            Optional.empty(),
+                            Optional.of(successorRef),
+                            () -> {
+                                entry.predecessor = null;
+                                entry.predecessorSelection = null;
+                                entry.successor = successorRef;
+                                entry.successorSelection = selection;
+                            },
                             afterTransition
                         );
                         close = true;
@@ -666,7 +698,13 @@ final class SemanticControlCoordinator
                     transitionGuardLocked(
                         entry,
                         SemanticPredecessorGuardState.SUCCESSOR_AUTHORIZED,
-                        Optional.empty()
+                        Optional.empty(),
+                        Optional.ofNullable(entry.predecessor),
+                        Optional.of(successorRef),
+                        () -> {
+                            entry.successor = successorRef;
+                            entry.successorSelection = selection;
+                        }
                     );
                     cancelTimeout(entry);
                     appendGuardDecision(entry, ForwardingDecision.FORWARD);
@@ -677,12 +715,27 @@ final class SemanticControlCoordinator
                         entry,
                         SemanticPredecessorGuardState.VIOLATED,
                         Optional.empty(),
+                        Optional.ofNullable(entry.predecessor),
+                        Optional.of(successorRef),
+                        () -> {
+                            entry.successor = successorRef;
+                            entry.successorSelection = selection;
+                        },
                         afterTransition
                     );
                     close = true;
                 }
                 case VIOLATED, CANCELLED, TIMED_OUT, FAILED -> {
-                    appendGuardDecision(entry, ForwardingDecision.CLOSE_SESSION);
+                    appendGuardDecision(
+                        entry,
+                        ForwardingDecision.CLOSE_SESSION,
+                        Optional.ofNullable(entry.predecessor),
+                        Optional.of(successorRef),
+                        () -> {
+                            entry.successor = successorRef;
+                            entry.successorSelection = selection;
+                        }
+                    );
                     close = true;
                 }
                 default -> throw new IllegalStateException(
@@ -697,21 +750,33 @@ final class SemanticControlCoordinator
                 || entry.state != SemanticPredecessorGuardState.ARMED) {
                 continue;
             }
-            entry.predecessor = interaction.interactionRef();
-            entry.predecessorSelection = selection.predecessor;
+            InteractionRef predecessorRef = interaction.interactionRef();
+            SelectorSelection predecessorSelection = selection.predecessor;
             if (entry.requiredBoundary == SemanticPredecessorBoundary.CONFIRMED) {
                 transitionGuardLocked(
                     entry,
                     SemanticPredecessorGuardState.PREDECESSOR_SATISFIED,
-                    Optional.empty()
+                    Optional.empty(),
+                    Optional.of(predecessorRef),
+                    Optional.ofNullable(entry.successor),
+                    () -> {
+                        entry.predecessor = predecessorRef;
+                        entry.predecessorSelection = predecessorSelection;
+                    }
                 );
             } else {
                 transitionGuardLocked(
                     entry,
                     SemanticPredecessorGuardState.PREDECESSOR_OBSERVED,
-                    Optional.empty()
+                    Optional.empty(),
+                    Optional.of(predecessorRef),
+                    Optional.ofNullable(entry.successor),
+                    () -> {
+                        entry.predecessor = predecessorRef;
+                        entry.predecessorSelection = predecessorSelection;
+                    }
                 );
-                forwardedPredecessors.add(new GuardUse(entry, selection.predecessor));
+                forwardedPredecessors.add(new GuardUse(entry, predecessorSelection));
             }
         }
         return new GuardDecision(close, forwardedPredecessors, authorized);
@@ -766,10 +831,19 @@ final class SemanticControlCoordinator
         RecordedInteraction interaction,
         AfterTransition afterTransition
     ) {
-        entry.interactionRef = interaction.interactionRef();
-        entry.selection = selection;
-        transitionHoldLocked(entry, SemanticHoldState.REACHED_HELD, Optional.empty());
-        entry.reachedEstablished = true;
+        InteractionRef interactionRef = interaction.interactionRef();
+        appendHold(
+            entry,
+            SemanticHoldState.REACHED_HELD,
+            Optional.empty(),
+            Optional.of(interactionRef),
+            () -> {
+                entry.interactionRef = interactionRef;
+                entry.selection = selection;
+                entry.state = SemanticHoldState.REACHED_HELD;
+                entry.reachedEstablished = true;
+            }
+        );
         afterTransition.addPublic(() -> entry.reached.complete(entry.interactionRef));
         try {
             TimeoutTask scheduled = timeoutScheduler.schedule(
@@ -875,174 +949,199 @@ final class SemanticControlCoordinator
     private CompletionStage<Void> release(HoldEntry entry) {
         AfterTransition afterTransition = new AfterTransition();
         CompletionStage<Void> result;
-        synchronized (this) {
-            result = authoritativeOperationLocked(() -> {
-                if (entry.state != SemanticHoldState.REACHED_HELD) {
-                    return failedStage(
-                        "Semantic hold cannot be released from state " + entry.state
-                    );
-                }
-                CompletionStage<Void> release = entry.releaseCompletion.minimalCompletionStage();
-                if (!entry.selection.remainsValid(proofSubjects)) {
-                    failHoldLocked(
-                        entry,
-                        SemanticHoldFailure.CORRELATION_INVALIDATED,
-                        afterTransition
-                    );
-                } else {
-                    transitionHoldLocked(entry, SemanticHoldState.RELEASING, Optional.empty());
-                    cancelTimeout(entry);
-                    afterTransition.addInternal(
-                        () -> entry.permit.authorize(ForwardingDecision.FORWARD)
-                    );
-                }
-                return release;
-            });
+        try {
+            synchronized (this) {
+                result = authoritativeOperationLocked(() -> {
+                    if (entry.state != SemanticHoldState.REACHED_HELD) {
+                        return failedStage(
+                            "Semantic hold cannot be released from state " + entry.state
+                        );
+                    }
+                    CompletionStage<Void> release =
+                        entry.releaseCompletion.minimalCompletionStage();
+                    if (!entry.selection.remainsValid(proofSubjects)) {
+                        failHoldLocked(
+                            entry,
+                            SemanticHoldFailure.CORRELATION_INVALIDATED,
+                            afterTransition
+                        );
+                    } else {
+                        transitionHoldLocked(
+                            entry,
+                            SemanticHoldState.RELEASING,
+                            Optional.empty()
+                        );
+                        cancelTimeout(entry);
+                        afterTransition.addInternal(
+                            () -> entry.permit.authorize(ForwardingDecision.FORWARD)
+                        );
+                    }
+                    return release;
+                }, afterTransition);
+            }
+        } finally {
+            runAfterTransition(afterTransition);
         }
-        runAfterTransition(afterTransition);
         return result;
     }
 
     private boolean cancel(HoldEntry entry) {
         AfterTransition afterTransition = new AfterTransition();
         boolean cancelled;
-        synchronized (this) {
-            cancelled = authoritativeOperationLocked(() -> {
-                if (entry.state != SemanticHoldState.DECLARED
-                    && entry.state != SemanticHoldState.ARMED
-                    && entry.state != SemanticHoldState.REACHED_HELD) {
-                    return false;
-                }
-                terminalHoldLocked(
-                    entry,
-                    SemanticHoldState.CANCELLED,
-                    Optional.empty(),
-                    afterTransition
-                );
-                return true;
-            });
+        try {
+            synchronized (this) {
+                cancelled = authoritativeOperationLocked(() -> {
+                    if (entry.state != SemanticHoldState.DECLARED
+                        && entry.state != SemanticHoldState.ARMED
+                        && entry.state != SemanticHoldState.REACHED_HELD) {
+                        return false;
+                    }
+                    terminalHoldLocked(
+                        entry,
+                        SemanticHoldState.CANCELLED,
+                        Optional.empty(),
+                        afterTransition
+                    );
+                    return true;
+                }, afterTransition);
+            }
+        } finally {
+            runAfterTransition(afterTransition);
         }
-        runAfterTransition(afterTransition);
         return cancelled;
     }
 
     private boolean cancel(GuardEntry entry) {
         AfterTransition afterTransition = new AfterTransition();
         boolean cancelled;
-        synchronized (this) {
-            cancelled = authoritativeOperationLocked(() -> {
-                if (entry.state != SemanticPredecessorGuardState.DECLARED
-                    && !guardAwaitsTimedBoundary(entry.state)) {
-                    return false;
-                }
-                terminalGuardLocked(
-                    entry,
-                    SemanticPredecessorGuardState.CANCELLED,
-                    Optional.empty(),
-                    afterTransition
-                );
-                return true;
-            });
+        try {
+            synchronized (this) {
+                cancelled = authoritativeOperationLocked(() -> {
+                    if (entry.state != SemanticPredecessorGuardState.DECLARED
+                        && !guardAwaitsTimedBoundary(entry.state)) {
+                        return false;
+                    }
+                    terminalGuardLocked(
+                        entry,
+                        SemanticPredecessorGuardState.CANCELLED,
+                        Optional.empty(),
+                        afterTransition
+                    );
+                    return true;
+                }, afterTransition);
+            }
+        } finally {
+            runAfterTransition(afterTransition);
         }
-        runAfterTransition(afterTransition);
         return cancelled;
     }
 
     private void timeout(HoldEntry entry) {
         AfterTransition afterTransition = new AfterTransition();
-        synchronized (this) {
-            authoritativeOperationLocked(() -> {
-                if (entry.state == SemanticHoldState.REACHED_HELD) {
-                    terminalHoldLocked(
-                        entry,
-                        SemanticHoldState.TIMED_OUT,
-                        Optional.empty(),
-                        afterTransition
-                    );
-                }
-                return null;
-            });
+        try {
+            synchronized (this) {
+                authoritativeOperationLocked(() -> {
+                    if (entry.state == SemanticHoldState.REACHED_HELD) {
+                        terminalHoldLocked(
+                            entry,
+                            SemanticHoldState.TIMED_OUT,
+                            Optional.empty(),
+                            afterTransition
+                        );
+                    }
+                    return null;
+                }, afterTransition);
+            }
+        } finally {
+            runAfterTransition(afterTransition);
         }
-        runAfterTransition(afterTransition);
     }
 
     private void timeout(GuardEntry entry) {
         AfterTransition afterTransition = new AfterTransition();
-        synchronized (this) {
-            authoritativeOperationLocked(() -> {
-                if (guardAwaitsTimedBoundary(entry.state)) {
-                    terminalGuardLocked(
-                        entry,
-                        SemanticPredecessorGuardState.TIMED_OUT,
-                        Optional.empty(),
-                        afterTransition
-                    );
-                }
-                return null;
-            });
+        try {
+            synchronized (this) {
+                authoritativeOperationLocked(() -> {
+                    if (guardAwaitsTimedBoundary(entry.state)) {
+                        terminalGuardLocked(
+                            entry,
+                            SemanticPredecessorGuardState.TIMED_OUT,
+                            Optional.empty(),
+                            afterTransition
+                        );
+                    }
+                    return null;
+                }, afterTransition);
+            }
+        } finally {
+            runAfterTransition(afterTransition);
         }
-        runAfterTransition(afterTransition);
     }
 
     private void forwarded(PermitContext context) {
         AfterTransition afterTransition = new AfterTransition();
-        synchronized (this) {
-            authoritativeOperationLocked(() -> {
-                if (!context.claimOutcome()) {
+        try {
+            synchronized (this) {
+                authoritativeOperationLocked(() -> {
+                    if (!context.claimOutcome()) {
+                        return null;
+                    }
+                    for (GuardUse use : context.authorizedSuccessors) {
+                        GuardEntry entry = use.entry;
+                        if (entry.state
+                            != SemanticPredecessorGuardState.SUCCESSOR_AUTHORIZED) {
+                            continue;
+                        }
+                        if (!use.selection.remainsValid(proofSubjects)) {
+                            failGuardLocked(
+                                entry,
+                                SemanticPredecessorGuardFailure.CORRELATION_INVALIDATED,
+                                afterTransition
+                            );
+                            continue;
+                        }
+                        terminalGuardLocked(
+                            entry,
+                            SemanticPredecessorGuardState.SATISFIED,
+                            Optional.empty(),
+                            afterTransition
+                        );
+                    }
+                    for (GuardUse use : context.forwardedPredecessors) {
+                        GuardEntry entry = use.entry;
+                        if (entry.state
+                            != SemanticPredecessorGuardState.PREDECESSOR_OBSERVED) {
+                            continue;
+                        }
+                        if (!use.selection.remainsValid(proofSubjects)) {
+                            failGuardLocked(
+                                entry,
+                                SemanticPredecessorGuardFailure.CORRELATION_INVALIDATED,
+                                afterTransition
+                            );
+                            continue;
+                        }
+                        transitionGuardLocked(
+                            entry,
+                            SemanticPredecessorGuardState.PREDECESSOR_SATISFIED,
+                            Optional.empty()
+                        );
+                    }
+                    if (context.hold != null
+                        && context.hold.state == SemanticHoldState.RELEASING) {
+                        terminalHoldLocked(
+                            context.hold,
+                            SemanticHoldState.FORWARDED,
+                            Optional.empty(),
+                            afterTransition
+                        );
+                    }
                     return null;
-                }
-                for (GuardUse use : context.authorizedSuccessors) {
-                    GuardEntry entry = use.entry;
-                    if (entry.state != SemanticPredecessorGuardState.SUCCESSOR_AUTHORIZED) {
-                        continue;
-                    }
-                    if (!use.selection.remainsValid(proofSubjects)) {
-                        failGuardLocked(
-                            entry,
-                            SemanticPredecessorGuardFailure.CORRELATION_INVALIDATED,
-                            afterTransition
-                        );
-                        continue;
-                    }
-                    terminalGuardLocked(
-                        entry,
-                        SemanticPredecessorGuardState.SATISFIED,
-                        Optional.empty(),
-                        afterTransition
-                    );
-                }
-                for (GuardUse use : context.forwardedPredecessors) {
-                    GuardEntry entry = use.entry;
-                    if (entry.state != SemanticPredecessorGuardState.PREDECESSOR_OBSERVED) {
-                        continue;
-                    }
-                    if (!use.selection.remainsValid(proofSubjects)) {
-                        failGuardLocked(
-                            entry,
-                            SemanticPredecessorGuardFailure.CORRELATION_INVALIDATED,
-                            afterTransition
-                        );
-                        continue;
-                    }
-                    transitionGuardLocked(
-                        entry,
-                        SemanticPredecessorGuardState.PREDECESSOR_SATISFIED,
-                        Optional.empty()
-                    );
-                }
-                if (context.hold != null
-                    && context.hold.state == SemanticHoldState.RELEASING) {
-                    terminalHoldLocked(
-                        context.hold,
-                        SemanticHoldState.FORWARDED,
-                        Optional.empty(),
-                        afterTransition
-                    );
-                }
-                return null;
-            });
+                }, afterTransition);
+            }
+        } finally {
+            runAfterTransition(afterTransition);
         }
-        runAfterTransition(afterTransition);
     }
 
     private void writeFailed(PermitContext context) {
@@ -1061,30 +1160,33 @@ final class SemanticControlCoordinator
         SemanticHoldFailure holdFailure
     ) {
         AfterTransition afterTransition = new AfterTransition();
-        synchronized (this) {
-            authoritativeOperationLocked(() -> {
-                if (!context.claimOutcome()) {
+        try {
+            synchronized (this) {
+                authoritativeOperationLocked(() -> {
+                    if (!context.claimOutcome()) {
+                        return null;
+                    }
+                    abortGuardUsesLocked(
+                        context.authorizedSuccessors,
+                        guardFailure,
+                        afterTransition
+                    );
+                    abortGuardUsesLocked(
+                        context.forwardedPredecessors,
+                        guardFailure,
+                        afterTransition
+                    );
+                    if (context.hold != null
+                        && (context.hold.state == SemanticHoldState.REACHED_HELD
+                            || context.hold.state == SemanticHoldState.RELEASING)) {
+                        failHoldLocked(context.hold, holdFailure, afterTransition);
+                    }
                     return null;
-                }
-                abortGuardUsesLocked(
-                    context.authorizedSuccessors,
-                    guardFailure,
-                    afterTransition
-                );
-                abortGuardUsesLocked(
-                    context.forwardedPredecessors,
-                    guardFailure,
-                    afterTransition
-                );
-                if (context.hold != null
-                    && (context.hold.state == SemanticHoldState.REACHED_HELD
-                        || context.hold.state == SemanticHoldState.RELEASING)) {
-                    failHoldLocked(context.hold, holdFailure, afterTransition);
-                }
-                return null;
-            });
+                }, afterTransition);
+            }
+        } finally {
+            runAfterTransition(afterTransition);
         }
-        runAfterTransition(afterTransition);
     }
 
     void completeExecution() {
@@ -1109,11 +1211,13 @@ final class SemanticControlCoordinator
             for (GuardEntry entry : List.copyOf(allGuards.values())) {
                 if (entry.state == SemanticPredecessorGuardState.DECLARED
                     || guardIsActiveForFailureOrTeardown(entry.state)) {
-                    entry.retainCancelledEnforcement = true;
                     terminalGuardLocked(
                         entry,
                         SemanticPredecessorGuardState.CANCELLED,
                         Optional.empty(),
+                        Optional.ofNullable(entry.predecessor),
+                        Optional.ofNullable(entry.successor),
+                        () -> entry.retainCancelledEnforcement = true,
                         afterTransition
                     );
                 }
@@ -1202,8 +1306,8 @@ final class SemanticControlCoordinator
         Optional<SemanticHoldFailure> failure
     ) {
         next = Objects.requireNonNull(next, "next must not be null");
-        appendHold(entry, next, failure);
-        entry.state = next;
+        SemanticHoldState committedState = next;
+        appendHold(entry, next, failure, () -> entry.state = committedState);
     }
 
     private void failGuardLocked(
@@ -1228,7 +1332,34 @@ final class SemanticControlCoordinator
         Optional<SemanticPredecessorGuardFailure> failure,
         AfterTransition afterTransition
     ) {
-        transitionGuardLocked(entry, terminalState, failure);
+        terminalGuardLocked(
+            entry,
+            terminalState,
+            failure,
+            Optional.ofNullable(entry.predecessor),
+            Optional.ofNullable(entry.successor),
+            () -> {},
+            afterTransition
+        );
+    }
+
+    private void terminalGuardLocked(
+        GuardEntry entry,
+        SemanticPredecessorGuardState terminalState,
+        Optional<SemanticPredecessorGuardFailure> failure,
+        Optional<InteractionRef> predecessor,
+        Optional<InteractionRef> successor,
+        Runnable stateCommit,
+        AfterTransition afterTransition
+    ) {
+        transitionGuardLocked(
+            entry,
+            terminalState,
+            failure,
+            predecessor,
+            successor,
+            stateCommit
+        );
         cancelTimeout(entry);
         if (terminalState == SemanticPredecessorGuardState.SATISFIED
             || (terminalState == SemanticPredecessorGuardState.CANCELLED
@@ -1245,7 +1376,30 @@ final class SemanticControlCoordinator
         SemanticPredecessorGuardState next,
         Optional<SemanticPredecessorGuardFailure> failure
     ) {
+        transitionGuardLocked(
+            entry,
+            next,
+            failure,
+            Optional.ofNullable(entry.predecessor),
+            Optional.ofNullable(entry.successor),
+            () -> {}
+        );
+    }
+
+    private void transitionGuardLocked(
+        GuardEntry entry,
+        SemanticPredecessorGuardState next,
+        Optional<SemanticPredecessorGuardFailure> failure,
+        Optional<InteractionRef> predecessor,
+        Optional<InteractionRef> successor,
+        Runnable stateCommit
+    ) {
         next = Objects.requireNonNull(next, "next must not be null");
+        SemanticPredecessorGuardState committedState = next;
+        Runnable committedMutation = () -> {
+            stateCommit.run();
+            entry.state = committedState;
+        };
         if (next == SemanticPredecessorGuardState.SATISFIED) {
             appendGuardFact(
                 entry,
@@ -1253,7 +1407,10 @@ final class SemanticControlCoordinator
                 SemanticPredecessorGuardEvent.Kind.TERMINAL,
                 Optional.empty(),
                 Optional.empty(),
-                Optional.empty()
+                Optional.empty(),
+                predecessor,
+                successor,
+                committedMutation
             );
         } else if (next == SemanticPredecessorGuardState.VIOLATED) {
             appendGuardFact(
@@ -1262,18 +1419,47 @@ final class SemanticControlCoordinator
                 SemanticPredecessorGuardEvent.Kind.TERMINAL,
                 Optional.of(ForwardingDecision.CLOSE_SESSION),
                 Optional.of(SemanticPredecessorViolation.PREDECESSOR_NOT_ESTABLISHED),
-                Optional.empty()
+                Optional.empty(),
+                predecessor,
+                successor,
+                committedMutation
             );
         } else {
-            appendGuardState(entry, next, failure);
+            appendGuardFact(
+                entry,
+                next,
+                SemanticPredecessorGuardEvent.Kind.STATE,
+                Optional.empty(),
+                Optional.empty(),
+                failure,
+                predecessor,
+                successor,
+                committedMutation
+            );
         }
-        entry.state = next;
     }
 
     private void appendHold(
         HoldEntry entry,
         SemanticHoldState state,
-        Optional<SemanticHoldFailure> failure
+        Optional<SemanticHoldFailure> failure,
+        Runnable stateCommit
+    ) {
+        appendHold(
+            entry,
+            state,
+            failure,
+            Optional.ofNullable(entry.interactionRef),
+            stateCommit
+        );
+    }
+
+    private void appendHold(
+        HoldEntry entry,
+        SemanticHoldState state,
+        Optional<SemanticHoldFailure> failure,
+        Optional<InteractionRef> interactionRef,
+        Runnable stateCommit
     ) {
         events.semanticHold(
             entry.ref,
@@ -1282,15 +1468,17 @@ final class SemanticControlCoordinator
             entry.direction,
             entry.evidenceSchema,
             entry.proofSubject,
-            Optional.ofNullable(entry.interactionRef),
-            failure
+            interactionRef,
+            failure,
+            stateCommit
         );
     }
 
     private void appendGuardState(
         GuardEntry entry,
         SemanticPredecessorGuardState state,
-        Optional<SemanticPredecessorGuardFailure> failure
+        Optional<SemanticPredecessorGuardFailure> failure,
+        Runnable stateCommit
     ) {
         appendGuardFact(
             entry,
@@ -1298,7 +1486,8 @@ final class SemanticControlCoordinator
             SemanticPredecessorGuardEvent.Kind.STATE,
             Optional.empty(),
             Optional.empty(),
-            failure
+            failure,
+            stateCommit
         );
     }
 
@@ -1306,13 +1495,32 @@ final class SemanticControlCoordinator
         GuardEntry entry,
         ForwardingDecision decision
     ) {
+        appendGuardDecision(
+            entry,
+            decision,
+            Optional.ofNullable(entry.predecessor),
+            Optional.ofNullable(entry.successor),
+            () -> {}
+        );
+    }
+
+    private void appendGuardDecision(
+        GuardEntry entry,
+        ForwardingDecision decision,
+        Optional<InteractionRef> predecessor,
+        Optional<InteractionRef> successor,
+        Runnable stateCommit
+    ) {
         appendGuardFact(
             entry,
             entry.state,
             SemanticPredecessorGuardEvent.Kind.DECISION,
             Optional.of(decision),
             Optional.empty(),
-            Optional.empty()
+            Optional.empty(),
+            predecessor,
+            successor,
+            stateCommit
         );
     }
 
@@ -1326,7 +1534,8 @@ final class SemanticControlCoordinator
             SemanticPredecessorGuardEvent.Kind.SUPPRESSED_FAILURE,
             Optional.empty(),
             Optional.empty(),
-            Optional.of(Objects.requireNonNull(failure, "failure must not be null"))
+            Optional.of(Objects.requireNonNull(failure, "failure must not be null")),
+            () -> {}
         );
     }
 
@@ -1336,7 +1545,32 @@ final class SemanticControlCoordinator
         SemanticPredecessorGuardEvent.Kind kind,
         Optional<ForwardingDecision> decision,
         Optional<SemanticPredecessorViolation> violation,
-        Optional<SemanticPredecessorGuardFailure> failure
+        Optional<SemanticPredecessorGuardFailure> failure,
+        Runnable stateCommit
+    ) {
+        appendGuardFact(
+            entry,
+            state,
+            kind,
+            decision,
+            violation,
+            failure,
+            Optional.ofNullable(entry.predecessor),
+            Optional.ofNullable(entry.successor),
+            stateCommit
+        );
+    }
+
+    private void appendGuardFact(
+        GuardEntry entry,
+        SemanticPredecessorGuardState state,
+        SemanticPredecessorGuardEvent.Kind kind,
+        Optional<ForwardingDecision> decision,
+        Optional<SemanticPredecessorViolation> violation,
+        Optional<SemanticPredecessorGuardFailure> failure,
+        Optional<InteractionRef> predecessor,
+        Optional<InteractionRef> successor,
+        Runnable stateCommit
     ) {
         events.semanticPredecessorGuard(
             entry.ref,
@@ -1344,11 +1578,12 @@ final class SemanticControlCoordinator
             entry.subject,
             state,
             entry.requiredBoundary,
-            Optional.ofNullable(entry.predecessor),
-            Optional.ofNullable(entry.successor),
+            predecessor,
+            successor,
             decision,
             violation,
-            failure
+            failure,
+            stateCommit
         );
     }
 
@@ -1575,19 +1810,30 @@ final class SemanticControlCoordinator
     }
 
     private void runAfterTransition(AfterTransition actions) {
-        actions.runInternal();
         CompletionGate publicationGate = new CompletionGate();
-        dispatchPublic(actions, publicationGate);
         try {
-            proofObservations.finalizePending();
+            actions.runInternal();
+            dispatchPublic(actions, publicationGate);
         } finally {
-            publicationGate.open();
+            actions.releaseFinalizationHandoffs();
+            try {
+                proofObservations.finalizePending();
+            } finally {
+                publicationGate.open();
+            }
         }
     }
 
-    private <T> T authoritativeOperationLocked(Supplier<T> operation) {
+    private <T> T authoritativeOperationLocked(
+        Supplier<T> operation,
+        AfterTransition afterTransition
+    ) {
         return events.proofFactBatch(
-            Objects.requireNonNull(operation, "operation must not be null")
+            Objects.requireNonNull(operation, "operation must not be null"),
+            Objects.requireNonNull(
+                afterTransition,
+                "afterTransition must not be null"
+            )::addFinalizationHandoff
         );
     }
 
@@ -1732,6 +1978,8 @@ final class SemanticControlCoordinator
     private static final class AfterTransition {
         private final List<Runnable> internalActions = new ArrayList<>();
         private final List<Runnable> publicCompletions = new ArrayList<>();
+        private final List<ProofFactObserver.FinalizationHandoff> finalizationHandoffs =
+            new ArrayList<>();
 
         private void addInternal(Runnable action) {
             internalActions.add(Objects.requireNonNull(action, "action must not be null"));
@@ -1744,12 +1992,28 @@ final class SemanticControlCoordinator
             ));
         }
 
+        private void addFinalizationHandoff(
+            ProofFactObserver.FinalizationHandoff handoff
+        ) {
+            finalizationHandoffs.add(Objects.requireNonNull(
+                handoff,
+                "handoff must not be null"
+            ));
+        }
+
         private void runInternal() {
             internalActions.forEach(Runnable::run);
         }
 
         private List<Runnable> publicCompletions() {
             return List.copyOf(publicCompletions);
+        }
+
+        private void releaseFinalizationHandoffs() {
+            finalizationHandoffs.forEach(
+                ProofFactObserver.FinalizationHandoff::release
+            );
+            finalizationHandoffs.clear();
         }
     }
 

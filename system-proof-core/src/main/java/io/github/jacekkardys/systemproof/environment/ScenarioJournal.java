@@ -39,7 +39,11 @@ final class ScenarioJournal {
         startedAt = recordsDiagnosticTime ? nanoTime.getAsLong() : 0L;
     }
 
-    /** Atomically assigns the next local sequence and inserts one event. */
+    /**
+     * Atomically assigns the next local sequence and inserts one event. Successful return is the
+     * authoritative durable in-memory commit point; rendering and log emission are downstream
+     * diagnostics and cannot change this storage.
+     */
     synchronized JournalEntry append(ScenarioEvent event) {
         Objects.requireNonNull(event, "event must not be null");
         JournalEntry entry = new JournalEntry(
