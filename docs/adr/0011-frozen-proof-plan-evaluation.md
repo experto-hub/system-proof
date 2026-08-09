@@ -158,6 +158,19 @@ only as a bounded type-only secondary diagnostic. An unrelated control that is a
 frozen plan cannot suppress a valid required violation. Independent events before or after the
 operation remain independently ordered.
 
+Each outer authoritative operation owns one thread-confined token. Successful journal facts,
+journal-integrity failures, observation-state changes, and required-observation failure intents are
+added to that token in invocation order. Nested authoritative calls join the parent token and cannot
+steal or flush it. Only after the action exits does the proof monitor apply the complete token and
+select one pending primary outcome. A required-observation failure therefore resolves the exact
+observation as `FAILED/OBSERVATION_FAILED` and every guard transition whose journal append committed
+as `FAILED/CONTROL_FAILED` in the same primary snapshot. Within an authoritative operation, a hold
+or guard transition changes runtime state only after its corresponding append succeeds; an append
+failure cannot manufacture a transition or replace already buffered exact facts with a generic
+resolution. Exceptional exits clear the owner token and batch state before result finalization.
+Unrelated threads do not inherit the token and still linearize independently before or after its
+detached application.
+
 The global nested lock order is semantic controls, the authoritative-operation boundary, proof
 subjects, journal publication, proof evaluation, and then completion delivery after all framework
 monitors are released. Subject creation, arming, and correlation-candidate publication use the
@@ -167,6 +180,17 @@ action, selector execution, exact current-state correlation validation, journal 
 callback roots, and potentially blocking user code never run under the proof monitor. The proof
 monitor receives only the detached complete batch after the authoritative action. This removes any
 proof-to-subject acquisition while preserving control and journal order.
+
+`permit(...)` retains the semantic-control monitor and then enters the authoritative-operation
+boundary before evaluating guard or hold selectors. Subject correlation is read only at that point:
+a candidate or competing arm that completed first participates in the decision, while a mutation
+that lost the boundary cannot affect it. Missing-to-unique and unique-to-ambiguous changes therefore
+produce exactly the same result as their mutation-first or permit-first serial order. Native-flow
+resolution returns a detached immutable snapshot before invoking its codec/extractor predicate, so
+no public selector code runs under the proof-subject registry monitor. The boundary remains held
+through the committed hold/guard state and transport decision. A predecessor whose correlation was
+invalidated before its permit commit cannot become satisfied or authorize a successor, and a
+non-match that became unique before that boundary cannot authorize early-successor bytes.
 
 Selecting the primary outcome freezes its complete primary resolutions but does not yet publish a
 `ProofResult`. Relevant independent failures remain eligible for deterministic, type-only,

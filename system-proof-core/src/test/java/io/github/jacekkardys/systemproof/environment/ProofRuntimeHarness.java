@@ -57,7 +57,14 @@ final class ProofRuntimeHarness implements AutoCloseable {
         SemanticControlCoordinator.TimeoutScheduler controlTimeouts,
         BoundaryHooks boundaryHooks
     ) {
-        this(deadlineScheduler, evaluator, controlTimeouts, boundaryHooks, null);
+        this(
+            deadlineScheduler,
+            evaluator,
+            controlTimeouts,
+            boundaryHooks,
+            null,
+            ScenarioJournal.withoutDiagnosticTime()
+        );
     }
 
     private ProofRuntimeHarness(
@@ -65,7 +72,8 @@ final class ProofRuntimeHarness implements AutoCloseable {
         ProofOutcomeEvaluator evaluator,
         SemanticControlCoordinator.TimeoutScheduler controlTimeouts,
         BoundaryHooks boundaryHooks,
-        SemanticControlCoordinator.CompletionDispatcher completionDispatcher
+        SemanticControlCoordinator.CompletionDispatcher completionDispatcher,
+        ScenarioJournal scenarioJournal
     ) {
         deadlines = java.util.Objects.requireNonNull(
             deadlineScheduler,
@@ -84,7 +92,10 @@ final class ProofRuntimeHarness implements AutoCloseable {
             List.of(ConnectionFactory.create(client.api, server.api))
         );
         EnvironmentLogging logging = EnvironmentLogging.defaults();
-        journal = ScenarioJournal.withoutDiagnosticTime();
+        journal = java.util.Objects.requireNonNull(
+            scenarioJournal,
+            "scenarioJournal must not be null"
+        );
         JournalRenderer renderer = new JournalRenderer();
         BoundaryHooks hooks = boundaryHooks;
         ProofFactObserver observedFacts = new ProofFactObserver() {
@@ -282,7 +293,19 @@ final class ProofRuntimeHarness implements AutoCloseable {
             ProofOutcomeEvaluator.failClosed(),
             new PassiveControlTimeoutScheduler(),
             BoundaryHooks.NONE,
-            completionDispatcher
+            completionDispatcher,
+            ScenarioJournal.withoutDiagnosticTime()
+        );
+    }
+
+    static ProofRuntimeHarness startWithJournal(ScenarioJournal journal) {
+        return new ProofRuntimeHarness(
+            new ManualDeadlineScheduler(),
+            ProofOutcomeEvaluator.failClosed(),
+            new PassiveControlTimeoutScheduler(),
+            BoundaryHooks.NONE,
+            null,
+            journal
         );
     }
 

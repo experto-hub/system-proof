@@ -45,7 +45,14 @@ import io.github.jacekkardys.systemproof.proof.CorrelationKey;
 import io.github.jacekkardys.systemproof.proof.ProofSubjectRef;
 import io.github.jacekkardys.systemproof.topology.ConnectionId;
 
-/** Environment-owned semantic-control registry, matcher, and linearization point. */
+/**
+ * Environment-owned semantic-control registry, matcher, and linearization point.
+ *
+ * <p>A permit owns this monitor before entering the authoritative proof-operation boundary. Only
+ * inside that boundary does it execute selectors, take detached subject-correlation snapshots, and
+ * commit the transport decision. Subject mutation therefore completes before selection or waits
+ * until after the decision; selector code never runs under the subject or proof monitor.
+ */
 final class SemanticControlCoordinator
     implements SemanticControls, InteractionDecisionCoordinator {
 
@@ -426,13 +433,13 @@ final class SemanticControlCoordinator
         AfterTransition afterTransition = new AfterTransition();
         ForwardingPermit permit;
         synchronized (this) {
-            GuardSelections guardSelections = selectGuardsLocked(recorded);
-            HoldMatch holdMatch = guardSelections.closesSession
-                ? HoldMatch.none()
-                : selectHoldLocked(recorded);
-            permit = events.proofFactBatch(() ->
-                decideLocked(recorded, guardSelections, holdMatch, afterTransition)
-            );
+            permit = events.proofFactBatch(() -> {
+                GuardSelections guardSelections = selectGuardsLocked(recorded);
+                HoldMatch holdMatch = guardSelections.closesSession
+                    ? HoldMatch.none()
+                    : selectHoldLocked(recorded);
+                return decideLocked(recorded, guardSelections, holdMatch, afterTransition);
+            });
         }
         runAfterTransition(afterTransition);
         return permit;
@@ -1194,8 +1201,9 @@ final class SemanticControlCoordinator
         SemanticHoldState next,
         Optional<SemanticHoldFailure> failure
     ) {
-        entry.state = Objects.requireNonNull(next, "next must not be null");
+        next = Objects.requireNonNull(next, "next must not be null");
         appendHold(entry, next, failure);
+        entry.state = next;
     }
 
     private void failGuardLocked(
@@ -1237,10 +1245,11 @@ final class SemanticControlCoordinator
         SemanticPredecessorGuardState next,
         Optional<SemanticPredecessorGuardFailure> failure
     ) {
-        entry.state = Objects.requireNonNull(next, "next must not be null");
+        next = Objects.requireNonNull(next, "next must not be null");
         if (next == SemanticPredecessorGuardState.SATISFIED) {
             appendGuardFact(
                 entry,
+                next,
                 SemanticPredecessorGuardEvent.Kind.TERMINAL,
                 Optional.empty(),
                 Optional.empty(),
@@ -1249,6 +1258,7 @@ final class SemanticControlCoordinator
         } else if (next == SemanticPredecessorGuardState.VIOLATED) {
             appendGuardFact(
                 entry,
+                next,
                 SemanticPredecessorGuardEvent.Kind.TERMINAL,
                 Optional.of(ForwardingDecision.CLOSE_SESSION),
                 Optional.of(SemanticPredecessorViolation.PREDECESSOR_NOT_ESTABLISHED),
@@ -1257,6 +1267,7 @@ final class SemanticControlCoordinator
         } else {
             appendGuardState(entry, next, failure);
         }
+        entry.state = next;
     }
 
     private void appendHold(
@@ -1283,6 +1294,7 @@ final class SemanticControlCoordinator
     ) {
         appendGuardFact(
             entry,
+            state,
             SemanticPredecessorGuardEvent.Kind.STATE,
             Optional.empty(),
             Optional.empty(),
@@ -1296,6 +1308,7 @@ final class SemanticControlCoordinator
     ) {
         appendGuardFact(
             entry,
+            entry.state,
             SemanticPredecessorGuardEvent.Kind.DECISION,
             Optional.of(decision),
             Optional.empty(),
@@ -1309,6 +1322,7 @@ final class SemanticControlCoordinator
     ) {
         appendGuardFact(
             entry,
+            entry.state,
             SemanticPredecessorGuardEvent.Kind.SUPPRESSED_FAILURE,
             Optional.empty(),
             Optional.empty(),
@@ -1318,6 +1332,7 @@ final class SemanticControlCoordinator
 
     private void appendGuardFact(
         GuardEntry entry,
+        SemanticPredecessorGuardState state,
         SemanticPredecessorGuardEvent.Kind kind,
         Optional<ForwardingDecision> decision,
         Optional<SemanticPredecessorViolation> violation,
@@ -1327,7 +1342,7 @@ final class SemanticControlCoordinator
             entry.ref,
             kind,
             entry.subject,
-            entry.state,
+            state,
             entry.requiredBoundary,
             Optional.ofNullable(entry.predecessor),
             Optional.ofNullable(entry.successor),

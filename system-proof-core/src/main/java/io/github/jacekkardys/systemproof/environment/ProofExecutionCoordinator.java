@@ -68,8 +68,10 @@ import io.github.jacekkardys.systemproof.topology.ConnectionId;
  * <p>The global nested order is semantic controls, the authoritative-operation boundary, proof
  * subjects, journal publication, then this proof-evaluation monitor. A participant may enter at a
  * later level, but never acquires an earlier one. The authoritative action and correlation
- * mutation run outside this monitor; only their detached complete fact batch enters proof state.
- * Completion delivery runs after every framework monitor and immutable-result gate is released.
+ * mutation run outside this monitor. One per-thread authoritative-operation token retains journal
+ * facts and direct proof intents in call order; only that detached complete operation enters proof
+ * state. Completion delivery runs after every framework monitor and immutable-result gate is
+ * released.
  */
 final class ProofExecutionCoordinator
     implements ProofFactObserver, ProofObservationListener {
@@ -84,12 +86,14 @@ final class ProofExecutionCoordinator
     private final ProofOutcomeEvaluator outcomeEvaluator;
     private final BoundaryObserver boundaryObserver;
     private final Object authoritativeOperationBoundary = new Object();
-    private final ThreadLocal<List<ScenarioEvent>> activeFactBatch = new ThreadLocal<>();
+    private final ThreadLocal<AuthoritativeOperationToken> activeOperation =
+        new ThreadLocal<>();
     private ProofSubjectRegistry proofSubjects;
     private SemanticControlCoordinator controls;
     private RuntimeConnectionRegistry connections;
     private final Set<ConnectionId> failedRequiredObservations = new LinkedHashSet<>();
     private ExecutionRecord execution;
+    private Thread authoritativeOperationOwner;
     private boolean bound;
     private boolean closed;
     private boolean activationReserved;
@@ -407,110 +411,148 @@ final class ProofExecutionCoordinator
     @Override
     public void fact(ScenarioEvent event) {
         Objects.requireNonNull(event, "event must not be null");
-        List<ScenarioEvent> batch = activeFactBatch.get();
-        if (batch != null) {
-            batch.add(event);
+        AuthoritativeOperationToken operation = activeOperation.get();
+        if (operation != null) {
+            operation.add(new JournalFact(event));
             return;
         }
         synchronized (authoritativeOperationBoundary) {
-            applyFacts(List.of(event), false);
+            applyIndependentFact(event);
         }
     }
 
     @Override
     public <T> T factBatch(Supplier<T> action) {
         action = Objects.requireNonNull(action, "action must not be null");
-        if (activeFactBatch.get() != null) {
+        if (activeOperation.get() != null) {
             return action.get();
         }
 
         boundaryObserver.beforeAuthoritativeOperationBoundary();
-        ExecutionRecord[] selected = new ExecutionRecord[1];
+        AuthoritativeOperationToken operation = null;
         try {
             synchronized (authoritativeOperationBoundary) {
-                List<ScenarioEvent> batch = new ArrayList<>();
-                activeFactBatch.set(batch);
+                operation = openAuthoritativeOperation();
+                activeOperation.set(operation);
                 try {
                     return action.get();
                 } finally {
-                    activeFactBatch.remove();
-                    selected[0] = applyFacts(batch, true);
+                    activeOperation.remove();
+                    try {
+                        applyAuthoritativeOperation(operation);
+                    } finally {
+                        closeAuthoritativeOperation(operation);
+                    }
                 }
             }
         } finally {
-            if (selected[0] != null) {
+            ExecutionRecord selected = operation == null
+                ? null
+                : operation.selectedOutcome;
+            if (selected != null) {
                 try {
                     boundaryObserver.authoritativeOutcomeSelectedBeforeFinalization();
                 } finally {
                     synchronized (this) {
-                        selected[0].authoritativeOutcomeBoundaryPending = false;
+                        selected.authoritativeOutcomeBoundaryPending = false;
                     }
                 }
             }
         }
     }
 
-    private ExecutionRecord applyFacts(
-        List<ScenarioEvent> events,
-        boolean authoritativeBatch
-    ) {
+    private AuthoritativeOperationToken openAuthoritativeOperation() {
+        synchronized (this) {
+            if (authoritativeOperationOwner != null) {
+                throw new IllegalStateException(
+                    "An authoritative proof operation is already active"
+                );
+            }
+            authoritativeOperationOwner = Thread.currentThread();
+            return new AuthoritativeOperationToken(authoritativeOperationOwner);
+        }
+    }
+
+    private void closeAuthoritativeOperation(AuthoritativeOperationToken operation) {
+        synchronized (this) {
+            if (authoritativeOperationOwner != operation.owner) {
+                throw new IllegalStateException(
+                    "Authoritative proof operation ownership changed"
+                );
+            }
+            authoritativeOperationOwner = null;
+        }
+    }
+
+    private void applyAuthoritativeOperation(AuthoritativeOperationToken operation) {
         synchronized (this) {
             ExecutionRecord record = execution;
-            ExecutionRecord selected = null;
-            boolean batchOpened = authoritativeBatch
-                && record != null
+            boolean batchOpened = record != null
                 && record.outcome == null
                 && record.state != ProofExecutionState.COMPLETED;
             if (batchOpened) {
                 record.factBatchActive = true;
             }
             try {
-                for (ScenarioEvent event : events) {
-                    PendingCompletion decisiveBefore = record == null
-                        ? null
-                        : record.pendingCompletion;
-                    List<RequirementStateSnapshot> statesBefore = decisiveBefore == null
-                        ? List.of()
-                        : snapshotStates(record);
-                    int secondaryBefore = record == null
-                        ? 0
-                        : record.secondaryDiagnostics.size();
-                    try {
-                        applyFactLocked(event);
-                    } catch (RuntimeException | Error evaluatorFailure) {
-                        rethrowFatal(evaluatorFailure);
-                        if (execution != null && execution.outcome == null) {
-                            completeLocked(
-                                execution,
-                                ProofOutcome.ERROR,
-                                new ProofDiagnostic(
-                                    ProofFailureStage.EVALUATION,
-                                    FailureDetails.from(evaluatorFailure)
-                                )
-                            );
-                        }
-                    }
-                    if (decisiveBefore != null
-                        && !compatibleWith(
-                            decisiveBefore.outcome(),
-                            record.states
-                        )) {
-                        restoreStates(record, statesBefore);
-                        record.pendingCompletion = decisiveBefore;
-                        if (record.secondaryDiagnostics.size() == secondaryBefore) {
-                            retainIncompatibleBatchFact(record, event);
-                        }
+                for (AuthoritativeOperationIntent intent : operation.intents) {
+                    switch (intent) {
+                        case JournalFact fact -> applyBatchFactLocked(record, fact.event);
+                        case JournalFailureIntent failure ->
+                            journalFailureAtBoundary(failure.failure);
+                        case ObservationChangedIntent observation ->
+                            observationChangedAtBoundary(observation.snapshot);
+                        case RequiredObservationFailedIntent observation ->
+                            requiredObservationFailedAtBoundary(observation.connectionId);
                     }
                 }
             } finally {
-                if (batchOpened) {
-                    if (completeFactBatchLocked(record)) {
-                        record.authoritativeOutcomeBoundaryPending = true;
-                        selected = record;
-                    }
+                if (batchOpened && completeFactBatchLocked(record)) {
+                    record.authoritativeOutcomeBoundaryPending = true;
+                    operation.selectedOutcome = record;
                 }
             }
-            return selected;
+        }
+    }
+
+    private void applyBatchFactLocked(ExecutionRecord record, ScenarioEvent event) {
+        PendingCompletion decisiveBefore = record == null
+            ? null
+            : record.pendingCompletion;
+        List<RequirementStateSnapshot> statesBefore = decisiveBefore == null
+            ? List.of()
+            : snapshotStates(record);
+        int secondaryBefore = record == null
+            ? 0
+            : record.secondaryDiagnostics.size();
+        try {
+            applyFactLocked(event);
+        } catch (RuntimeException | Error evaluatorFailure) {
+            rethrowFatal(evaluatorFailure);
+            if (execution != null && execution.outcome == null) {
+                completeLocked(
+                    execution,
+                    ProofOutcome.ERROR,
+                    new ProofDiagnostic(
+                        ProofFailureStage.EVALUATION,
+                        FailureDetails.from(evaluatorFailure)
+                    )
+                );
+            }
+        }
+        if (decisiveBefore != null
+            && !compatibleWith(decisiveBefore.outcome(), record.states)) {
+            restoreStates(record, statesBefore);
+            record.pendingCompletion = decisiveBefore;
+            if (record.secondaryDiagnostics.size() == secondaryBefore) {
+                retainIncompatibleBatchFact(record, event);
+            }
+        }
+    }
+
+    private void applyIndependentFact(ScenarioEvent event) {
+        synchronized (this) {
+            ExecutionRecord record = execution;
+            applyBatchFactLocked(record, event);
         }
     }
 
@@ -560,6 +602,11 @@ final class ProofExecutionCoordinator
     @Override
     public void journalFailure(Throwable failure) {
         Objects.requireNonNull(failure, "failure must not be null");
+        AuthoritativeOperationToken operation = activeOperation.get();
+        if (operation != null) {
+            operation.add(new JournalFailureIntent(failure));
+            return;
+        }
         synchronized (authoritativeOperationBoundary) {
             journalFailureAtBoundary(failure);
         }
@@ -591,6 +638,11 @@ final class ProofExecutionCoordinator
     @Override
     public void observationChanged(RuntimeConnectionSnapshot snapshot) {
         Objects.requireNonNull(snapshot, "snapshot must not be null");
+        AuthoritativeOperationToken operation = activeOperation.get();
+        if (operation != null) {
+            operation.add(new ObservationChangedIntent(snapshot));
+            return;
+        }
         synchronized (authoritativeOperationBoundary) {
             observationChangedAtBoundary(snapshot);
         }
@@ -667,6 +719,11 @@ final class ProofExecutionCoordinator
             connectionId,
             "connectionId must not be null"
         );
+        AuthoritativeOperationToken operation = activeOperation.get();
+        if (operation != null) {
+            operation.add(new RequiredObservationFailedIntent(connectionId));
+            return;
+        }
         synchronized (authoritativeOperationBoundary) {
             requiredObservationFailedAtBoundary(connectionId);
         }
@@ -2416,6 +2473,9 @@ final class ProofExecutionCoordinator
             record.finalizing,
             record.finalizationOwner != null,
             record.authoritativeOutcomeBoundaryPending,
+            authoritativeOperationOwner != null,
+            record.factBatchActive,
+            record.pendingCompletion != null,
             record.resultConstructionRecoveryCount
         );
     }
@@ -2462,6 +2522,9 @@ final class ProofExecutionCoordinator
         boolean finalizing,
         boolean finalizationOwnerPresent,
         boolean authoritativeOutcomeBoundaryPending,
+        boolean authoritativeOperationOwnerPresent,
+        boolean factBatchActive,
+        boolean pendingCompletionPresent,
         int resultConstructionRecoveryCount
     ) {}
 
@@ -2738,6 +2801,57 @@ final class ProofExecutionCoordinator
     ) {
         private PendingCompletion {
             Objects.requireNonNull(outcome, "outcome must not be null");
+        }
+    }
+
+    private sealed interface AuthoritativeOperationIntent
+        permits JournalFact, JournalFailureIntent, ObservationChangedIntent,
+            RequiredObservationFailedIntent {}
+
+    private record JournalFact(ScenarioEvent event)
+        implements AuthoritativeOperationIntent {
+        private JournalFact {
+            Objects.requireNonNull(event, "event must not be null");
+        }
+    }
+
+    private record JournalFailureIntent(Throwable failure)
+        implements AuthoritativeOperationIntent {
+        private JournalFailureIntent {
+            Objects.requireNonNull(failure, "failure must not be null");
+        }
+    }
+
+    private record ObservationChangedIntent(RuntimeConnectionSnapshot snapshot)
+        implements AuthoritativeOperationIntent {
+        private ObservationChangedIntent {
+            Objects.requireNonNull(snapshot, "snapshot must not be null");
+        }
+    }
+
+    private record RequiredObservationFailedIntent(ConnectionId connectionId)
+        implements AuthoritativeOperationIntent {
+        private RequiredObservationFailedIntent {
+            Objects.requireNonNull(connectionId, "connectionId must not be null");
+        }
+    }
+
+    private static final class AuthoritativeOperationToken {
+        private final Thread owner;
+        private final List<AuthoritativeOperationIntent> intents = new ArrayList<>();
+        private ExecutionRecord selectedOutcome;
+
+        private AuthoritativeOperationToken(Thread owner) {
+            this.owner = Objects.requireNonNull(owner, "owner must not be null");
+        }
+
+        private void add(AuthoritativeOperationIntent intent) {
+            if (Thread.currentThread() != owner) {
+                throw new IllegalStateException(
+                    "Only the authoritative operation owner may add proof intents"
+                );
+            }
+            intents.add(Objects.requireNonNull(intent, "intent must not be null"));
         }
     }
 

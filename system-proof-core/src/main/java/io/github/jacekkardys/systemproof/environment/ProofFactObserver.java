@@ -12,9 +12,10 @@ interface ProofFactObserver {
 
     /**
      * Applies the complete bounded fact set from one authoritative current-state operation before
-     * selecting its terminal proof outcome. The operation itself runs outside the proof monitor;
-     * the immutable result is frozen only after bounded independent secondary failures have had
-     * their ordered pre-publication boundary. This boundary never replays the journal.
+     * selecting its terminal proof outcome. One owner-thread token retains successful journal
+     * facts and direct journal/observation proof intents in call order; nested calls join that token
+     * and do not flush it. The operation itself runs outside the proof monitor. Independent facts
+     * remain ordered outside the token, and this boundary never replays the journal.
      */
     default <T> T factBatch(Supplier<T> action) {
         return Objects.requireNonNull(action, "action must not be null").get();
