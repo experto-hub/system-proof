@@ -694,7 +694,7 @@ class InteractionGatewayTest {
                         5,
                         TimeUnit.SECONDS
                     )).isEqualTo(SemanticHoldState.FAILED);
-                    assertThat(release.toCompletableFuture()).isCompletedExceptionally();
+                    assertCompletedExceptionally(release.toCompletableFuture());
                     assertPeerClosed(held);
                     fixture.frameServer().get().assertClosedWithoutPayload();
                     assertThat(fixture.environment().journalSnapshot().entries().stream()
@@ -791,7 +791,7 @@ class InteractionGatewayTest {
             }
 
             assertThat(hold.state()).isEqualTo(SemanticHoldState.CANCELLED);
-            assertThat(hold.release().toCompletableFuture()).isCompletedExceptionally();
+            assertCompletedExceptionally(hold.release().toCompletableFuture());
             assertThat(frameServer.get().hasPayload()).isFalse();
             assertThat(environment.runtimeConnections())
                 .filteredOn(snapshot -> snapshot.observationRequirement()
@@ -927,8 +927,7 @@ class InteractionGatewayTest {
                 assertThat(hold.completion().toCompletableFuture().get(5, TimeUnit.SECONDS))
                     .isEqualTo(SemanticHoldState.TIMED_OUT);
                 assertPeerClosed(socket);
-                assertThat(hold.release().toCompletableFuture())
-                    .isCompletedExceptionally();
+                assertCompletedExceptionally(hold.release().toCompletableFuture());
                 assertThat(frameServer.get().hasPayload()).isFalse();
                 assertThat(environment.runtimeConnections())
                     .filteredOn(snapshot -> snapshot.observationRequirement()
@@ -1730,7 +1729,7 @@ class InteractionGatewayTest {
 
                 assertThat(hold.completion().toCompletableFuture().get(5, TimeUnit.SECONDS))
                     .isEqualTo(SemanticHoldState.FAILED);
-                assertThat(release.toCompletableFuture()).isCompletedExceptionally();
+                assertCompletedExceptionally(release.toCompletableFuture());
                 assertThat(hold.state()).isEqualTo(SemanticHoldState.FAILED);
                 assertPeerClosed(socket);
                 FailingForwardingOutput output = failingOutput.get();
@@ -2104,6 +2103,14 @@ class InteractionGatewayTest {
         } catch (SocketException closedByPeer) {
             assertThat(closedByPeer).hasMessageNotContaining("timed out");
         }
+    }
+
+    private static void assertCompletedExceptionally(
+        java.util.concurrent.CompletableFuture<?> future
+    ) {
+        assertThatThrownBy(() -> future.get(5, TimeUnit.SECONDS))
+            .isInstanceOf(java.util.concurrent.ExecutionException.class)
+            .hasCauseInstanceOf(IllegalStateException.class);
     }
 
     private static void assertPortCanBeRebound(InetSocketAddress address) {
