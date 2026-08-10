@@ -543,8 +543,11 @@ The environment owns one thread-safe `InteractionDecisionCoordinator` shared by 
 It performs exact semantic-hold matching and state transitions under a short serialized boundary;
 permit waits, public awaits, socket writes, flushes, and callbacks never hold that coordinator lock.
 Traffic that matches no armed hold or predecessor guard receives an immediate forwarding permit.
-Semantic holds and predecessor guards share the coordinator; proof outcomes and the final T1
-scenario remain later work.
+Semantic holds and predecessor guards share the coordinator. The AML issue #13 investigation uses
+that API to keep the direct `CommitSucceeded -> positive deliver_sm_resp` obligation separate from
+the stronger HTTP-to-SMPP architectural hypothesis. Pinned stock Jasmin 0.11.0 deterministically
+violates the direct obligation; see the
+[`AML T1 investigation`](docs/investigations/aml-t1-jasmin-0.11.0.md).
 
 Core invokes the codec synchronously, copies the encoded bytes into a private `EvidenceSnapshot`,
 and retains neither the source value, codec, nor codec-produced array. Typed inspection uses the

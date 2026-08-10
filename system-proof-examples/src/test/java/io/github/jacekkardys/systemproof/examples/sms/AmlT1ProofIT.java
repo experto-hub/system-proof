@@ -9,81 +9,103 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
-import io.github.jacekkardys.systemproof.control.SemanticHold;
 import io.github.jacekkardys.systemproof.control.SemanticHoldState;
-import io.github.jacekkardys.systemproof.control.SemanticPredecessorGuard;
 import io.github.jacekkardys.systemproof.control.SemanticPredecessorGuardState;
 import io.github.jacekkardys.systemproof.examples.sms.environment.domain.TestSms;
 import io.github.jacekkardys.systemproof.examples.sms.environment.proof.AmlT1Environment;
 import io.github.jacekkardys.systemproof.examples.sms.environment.proof.AmlT1ProofPoint;
-import io.github.jacekkardys.systemproof.examples.sms.environment.proof.AmlT1ProofPoint.NativeAttribution;
+import io.github.jacekkardys.systemproof.examples.sms.environment.proof.AmlT1ProofPoint.CommitHoldExperiment;
+import io.github.jacekkardys.systemproof.examples.sms.environment.proof.AmlT1ProofPoint.CounterexampleState;
+import io.github.jacekkardys.systemproof.examples.sms.environment.proof.AmlT1ProofPoint.EarlyHttpNegative;
 import io.github.jacekkardys.systemproof.junit.annotation.SystemProof;
 import io.github.jacekkardys.systemproof.postgresql.PostgresqlDurabilityResult.RelationStatus;
 import io.github.jacekkardys.systemproof.postgresql.PostgresqlDurabilityResult.Setting;
-import io.github.jacekkardys.systemproof.proof.CorrelationKey;
 import io.github.jacekkardys.systemproof.proof.ProofExecution;
 import io.github.jacekkardys.systemproof.proof.ProofExecutionState;
-import io.github.jacekkardys.systemproof.proof.ProofPlan;
+import io.github.jacekkardys.systemproof.proof.ProofOutcome;
 import io.github.jacekkardys.systemproof.proof.ProofResult;
-import io.github.jacekkardys.systemproof.proof.ProofSubjectRef;
 
-/** Canonical positive and negative real-system proof of the AML T1 invariant. */
+/** Direct AML T1 falsification and the independent early-HTTP negative control. */
 @Tag("docker")
 final class AmlT1ProofIT {
 
     @SystemProof(
         value = AmlT1Environment.class,
-        title = "Deterministic AML T1 proof",
-        description = "Proves durable RAW and Outbox commit before positive HTTP and SMPP acknowledgement"
+        title = "AML T1 held-commit counterexample",
+        description = "Captures positive SMPP evidence while the exact RAW and Outbox commit is held"
     )
-    void provesCommitBeforePositiveAcknowledgement(AmlT1Environment environment)
+    void capturesPositiveSmppWhileExactCommitIsHeld(AmlT1Environment environment)
         throws Exception {
         TestSms message = proofMessage();
-        AmlT1ProofPoint proof = AmlT1ProofPoint.prepare(environment, message);
-        ProofSubjectRef subject = proof.subject();
-        CorrelationKey correlationKey = proof.correlationKey();
-        SemanticHold commitHold = proof.commitHold();
-        SemanticHold httpResponseHold = proof.httpResponseHold();
-        SemanticPredecessorGuard commitToHttp = proof.commitToHttpGuard();
-        SemanticPredecessorGuard httpToSmpp = proof.httpToSmppGuard();
-        ProofPlan plan = proof.plan();
-
-        assertThat(subject).isNotNull();
-        assertThat(correlationKey).isNotNull();
-        assertThat(commitHold.state()).isEqualTo(SemanticHoldState.DECLARED);
-        assertThat(httpResponseHold.state()).isEqualTo(SemanticHoldState.DECLARED);
-        assertThat(commitToHttp.state()).isEqualTo(SemanticPredecessorGuardState.DECLARED);
-        assertThat(httpToSmpp.state()).isEqualTo(SemanticPredecessorGuardState.DECLARED);
-        assertDurability(proof);
-
-        ProofExecution execution = environment.proofs().activate(plan);
+        CommitHoldExperiment experiment = AmlT1ProofPoint.prepareCommitHoldExperiment(
+            environment,
+            message
+        );
+        ProofExecution execution = environment.proofs().activate(experiment.plan());
         assertThat(execution.state()).isEqualTo(ProofExecutionState.ACTIVE);
+
         ExecutorService stimulusExecutor = boundedStimulusExecutor();
         try {
             var stimulus = stimulusExecutor.submit(() ->
                 execution.runStimulus(() -> environment.smsc().send(message))
             );
-            NativeAttribution attribution = proof.awaitCommitHeldAndAssertInvisible();
-            proof.releaseCommitAndAwaitDurability(attribution);
-            proof.awaitHttpHeldAndAssertNoEarlySmpp(attribution);
-            proof.releaseHttpAndAwaitRelations();
+            CounterexampleState counterexample = experiment.awaitCounterexampleState();
+            experiment.releaseAndAwaitDurability(counterexample);
             stimulus.get(AmlT1ProofPoint.TIMEOUT.toSeconds(), TimeUnit.SECONDS);
 
-            ProofResult result = execution.evaluate();
-            proof.assertProved(execution, result);
+            ProofResult coverage = execution.evaluate();
+            experiment.assertCoverage(execution, coverage);
         } finally {
             shutdown(stimulusExecutor);
         }
     }
 
+    @SystemProof(
+        value = AmlT1Environment.class,
+        title = "Direct AML T1 proof",
+        description = "Requires durable PostgreSQL commit before the correlated positive SMPP response"
+    )
+    void provesDirectCommitBeforePositiveSmppResponse(AmlT1Environment environment)
+        throws Exception {
+        TestSms message = proofMessage();
+        AmlT1ProofPoint proof = AmlT1ProofPoint.prepare(environment, message);
+        assertThat(proof.subject()).isNotNull();
+        assertThat(proof.correlationKey()).isNotNull();
+        assertThat(proof.commitHold().state()).isEqualTo(SemanticHoldState.DECLARED);
+        assertThat(proof.directGuard().state())
+            .isEqualTo(SemanticPredecessorGuardState.DECLARED);
+        assertDurability(proof);
+
+        ProofExecution execution = environment.proofs().activate(proof.plan());
+        assertThat(execution.state()).isEqualTo(ProofExecutionState.ACTIVE);
+        ExecutorService stimulusExecutor = boundedStimulusExecutor();
+        ProofResult result;
+        try {
+            stimulusExecutor.submit(() ->
+                execution.runStimulus(() -> environment.smsc().send(message))
+            );
+            result = proof.awaitDirectViolation(execution);
+            proof.assertDirectViolation(execution, result);
+        } finally {
+            shutdownAfterTerminal(stimulusExecutor);
+        }
+
+        // This is the canonical invariant assertion. It intentionally remains red for a real
+        // counterexample; the exact VIOLATED result above must never be converted to success.
+        result.require(ProofOutcome.PROVED);
+    }
+
     @Test
-    void rejectsTheRealEarlyAcknowledgingApplicationAsViolated() throws Exception {
+    void rejectsTheRealEarlyAcknowledgingApplicationForCommitBeforeHttp()
+        throws Exception {
         try (AmlT1Environment environment = AmlT1Environment.earlyAcknowledging()) {
             environment.start();
             TestSms message = proofMessage();
-            AmlT1ProofPoint proof = AmlT1ProofPoint.prepare(environment, message);
-            ProofPlan plan = proof.plan();
-            ProofExecution execution = environment.proofs().activate(plan);
+            EarlyHttpNegative negative = AmlT1ProofPoint.prepareEarlyHttpNegative(
+                environment,
+                message
+            );
+            ProofExecution execution = environment.proofs().activate(negative.plan());
             assertThat(execution.state()).isEqualTo(ProofExecutionState.ACTIVE);
 
             ExecutorService stimulusExecutor = boundedStimulusExecutor();
@@ -91,16 +113,11 @@ final class AmlT1ProofIT {
                 var stimulus = stimulusExecutor.submit(() ->
                     execution.runStimulus(() -> environment.smsc().send(message))
                 );
-                NativeAttribution attribution = proof.awaitCounterexampleCommitHeld();
-                proof.awaitEarlyHttpViolation();
-
-                ProofResult violated = execution.result();
-                proof.assertViolated(execution, violated);
-
-                proof.releaseCommitAndAwaitDurability(attribution);
+                ProofResult violated = negative.awaitViolation(execution);
+                negative.assertCommitBeforeHttpViolation(execution, violated);
                 stimulus.get(AmlT1ProofPoint.TIMEOUT.toSeconds(), TimeUnit.SECONDS);
+                negative.awaitEventuallyCommitted();
                 assertThat(execution.result()).isSameAs(violated);
-                proof.assertViolated(execution, violated);
             } finally {
                 shutdown(stimulusExecutor);
             }
@@ -133,5 +150,11 @@ final class AmlT1ProofIT {
     private static void shutdown(ExecutorService executor) throws InterruptedException {
         executor.shutdownNow();
         assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+    }
+
+    private static void shutdownAfterTerminal(ExecutorService executor)
+        throws InterruptedException {
+        executor.shutdownNow();
+        executor.awaitTermination(10, TimeUnit.SECONDS);
     }
 }

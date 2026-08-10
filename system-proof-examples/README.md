@@ -80,6 +80,17 @@ violation, forwards zero target successor bytes, and remains terminal after the 
 This enforces ordering only; proof outcomes and the final T1 proof remain outside the example.
 See [`ADR 0009`](../docs/adr/0009-semantic-predecessor-guards.md).
 
+`JasminHttpSmppCharacterizationIT` and `AmlT1ProofIT` keep three distinct claims separate. The
+first holds the exact positive HTTP response and observes that the correlated positive
+`deliver_sm_resp` has already arrived, falsifying only the architectural HTTP-to-SMPP hypothesis.
+The second captures the positive SMPP response while the exact PostgreSQL commit is held and RAW
+and Outbox remain invisible, then evaluates the authoritative direct
+`CommitSucceeded -> deliver_sm_resp` obligation. Stock pinned Jasmin violates that direct T1
+obligation; the canonical contract therefore remains intentionally red. The deliberately early
+application is evaluated by a third focused `CommitSucceeded -> HTTP positive` plan. Source-level
+control flow, decisive provenance, and repeated results are recorded in the
+[`AML T1 investigation`](../docs/investigations/aml-t1-jasmin-0.11.0.md).
+
 Default dependency images:
 
 - `postgres:17.6-alpine`
