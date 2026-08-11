@@ -25,7 +25,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicBoolean;
 import io.github.jacekkardys.systemproof.endpoint.SmppEndpoint;
 
 /**
@@ -35,6 +34,7 @@ import io.github.jacekkardys.systemproof.endpoint.SmppEndpoint;
 public final class ReferenceRelayOperations implements AutoCloseable {
     private static final Duration IO_TIMEOUT = Duration.ofSeconds(30);
     private static final Duration DELIVERY_TIMEOUT = Duration.ofSeconds(45);
+    private static final Duration CLOSE_TIMEOUT = Duration.ofSeconds(5);
     private static final int MAX_SMPP_PDU_BYTES = 64 * 1024;
     private static final int MAX_HTTP_HEADER_BYTES = 16 * 1024;
     private static final int MAX_HTTP_BODY_BYTES = 1024;
@@ -49,8 +49,10 @@ public final class ReferenceRelayOperations implements AutoCloseable {
     private final Socket smpp;
     private final URI callback;
     private final CompletableFuture<Delivery> completion = new CompletableFuture<>();
-    private final AtomicBoolean closed = new AtomicBoolean();
+    private final Object lifecycleMonitor = new Object();
     private final Thread receiver;
+    private boolean closed;
+    private Socket activeHttpSocket;
 
     private ReferenceRelayOperations(Socket smpp, URI callback) {
         this.smpp = smpp;
@@ -124,7 +126,7 @@ public final class ReferenceRelayOperations implements AutoCloseable {
 
     private void receiveOneDelivery() {
         try {
-            while (!closed.get()) {
+            while (!isClosed()) {
                 Pdu pdu = readPdu(smpp.getInputStream());
                 if (pdu.commandId == ENQUIRE_LINK) {
                     requireRequest(pdu, ENQUIRE_LINK, 0);
@@ -158,7 +160,7 @@ public final class ReferenceRelayOperations implements AutoCloseable {
                 return;
             }
         } catch (Throwable failure) {
-            if (!closed.get()) {
+            if (!isClosed()) {
                 completion.completeExceptionally(failure);
                 closeSocketAfterFailure(failure);
             }
@@ -173,7 +175,9 @@ public final class ReferenceRelayOperations implements AutoCloseable {
             + "Content-Type: application/x-www-form-urlencoded\r\n"
             + "Content-Length: " + body.length + "\r\n"
             + "Connection: close\r\n\r\n").getBytes(StandardCharsets.US_ASCII);
-        try (Socket socket = new Socket()) {
+        Socket socket = new Socket();
+        registerHttpSocket(socket);
+        try (socket) {
             socket.connect(
                 new InetSocketAddress(callback.getHost(), callback.getPort()),
                 Math.toIntExact(IO_TIMEOUT.toMillis())
@@ -184,6 +188,42 @@ public final class ReferenceRelayOperations implements AutoCloseable {
             output.write(body);
             output.flush();
             return readHttpResponse(socket.getInputStream());
+        } finally {
+            releaseHttpSocket(socket);
+        }
+    }
+
+    private void registerHttpSocket(Socket socket) throws IOException {
+        IOException rejection;
+        synchronized (lifecycleMonitor) {
+            if (closed) {
+                rejection = new IOException("Reference relay is closed");
+            } else if (activeHttpSocket != null) {
+                rejection = new IOException("Reference relay already has an active HTTP callback");
+            } else {
+                activeHttpSocket = socket;
+                return;
+            }
+        }
+        try {
+            socket.close();
+        } catch (IOException closeFailure) {
+            rejection.addSuppressed(closeFailure);
+        }
+        throw rejection;
+    }
+
+    private void releaseHttpSocket(Socket socket) {
+        synchronized (lifecycleMonitor) {
+            if (activeHttpSocket == socket) {
+                activeHttpSocket = null;
+            }
+        }
+    }
+
+    private boolean isClosed() {
+        synchronized (lifecycleMonitor) {
+            return closed;
         }
     }
 
@@ -540,18 +580,64 @@ public final class ReferenceRelayOperations implements AutoCloseable {
 
     @Override
     public void close() throws Exception {
-        if (!closed.compareAndSet(false, true)) {
-            return;
+        Socket http;
+        synchronized (lifecycleMonitor) {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            http = activeHttpSocket;
         }
-        smpp.close();
+
+        Exception cleanupFailure = null;
+        cleanupFailure = closeSocket(smpp, cleanupFailure);
+        cleanupFailure = closeSocket(http, cleanupFailure);
         receiver.interrupt();
-        receiver.join(TimeUnit.SECONDS.toMillis(10));
+        boolean interrupted = false;
+        try {
+            receiver.join(CLOSE_TIMEOUT.toMillis());
+        } catch (InterruptedException failure) {
+            interrupted = true;
+            cleanupFailure = appendCleanupFailure(cleanupFailure, failure);
+        }
         if (receiver.isAlive()) {
-            throw new IllegalStateException("Reference relay receiver did not terminate");
+            cleanupFailure = appendCleanupFailure(
+                cleanupFailure,
+                new IllegalStateException("Reference relay receiver did not terminate")
+            );
         }
         completion.completeExceptionally(
             new IllegalStateException("Reference relay closed before completing a delivery")
         );
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
+        if (cleanupFailure != null) {
+            throw cleanupFailure;
+        }
+    }
+
+    private static Exception closeSocket(Socket socket, Exception cleanupFailure) {
+        if (socket == null) {
+            return cleanupFailure;
+        }
+        try {
+            socket.close();
+            return cleanupFailure;
+        } catch (Exception failure) {
+            return appendCleanupFailure(cleanupFailure, failure);
+        }
+    }
+
+    private static Exception appendCleanupFailure(
+        Exception cleanupFailure,
+        Exception nextFailure
+    ) {
+        if (cleanupFailure == null) {
+            return nextFailure;
+        }
+        cleanupFailure.addSuppressed(nextFailure);
+        return cleanupFailure;
     }
 
     public record Delivery(
