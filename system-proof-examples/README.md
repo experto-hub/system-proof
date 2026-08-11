@@ -80,15 +80,16 @@ violation, forwards zero target successor bytes, and remains terminal after the 
 This enforces ordering only; proof outcomes and the final T1 proof remain outside the example.
 See [`ADR 0009`](../docs/adr/0009-semantic-predecessor-guards.md).
 
-`JasminHttpSmppCharacterizationIT` and `AmlT1ProofIT` keep three distinct claims separate. The
-first holds the exact positive HTTP response and observes that the correlated positive
-`deliver_sm_resp` has already arrived, falsifying only the architectural HTTP-to-SMPP hypothesis.
-The second captures the positive SMPP response while the exact PostgreSQL commit is held and RAW
-and Outbox remain invisible, then evaluates the authoritative direct
-`CommitSucceeded -> deliver_sm_resp` obligation. Stock pinned Jasmin violates that direct T1
-obligation; the canonical contract therefore remains intentionally red. The deliberately early
-application is evaluated by a third focused `CommitSucceeded -> HTTP positive` plan. Source-level
-control flow, decisive provenance, and repeated results are recorded in the
+`JasminHttpSmppCharacterizationIT` and `AmlT1ProofIT` keep four distinct claims separate. The
+canonical direct T1 plan contains only the durability prerequisite, required PostgreSQL/SMPP
+observation and correlation, and the single
+`CommitSucceeded.CONFIRMED -> positive deliver_sm_resp.OBSERVED` guard with its evidence and causal
+relation. The synchronous JVM reference relay reaches `PROVED` with that unchanged plan. Stock
+pinned Jasmin reaches `VIOLATED` with the same plan and decisive positive SMPP successor
+provenance. The held-commit `1 CommitAttempt / 0 CommitSucceeded / 0 RAW / 0 Outbox / 1 positive
+SMPP` state remains a separate characterization plan without a business verdict about T1. The
+HTTP-held characterization and deliberately early application keep their separate HTTP/SMPP and
+commit/HTTP claims. Source-level Jasmin control flow and the original investigation are recorded in the
 [`AML T1 investigation`](../docs/investigations/aml-t1-jasmin-0.11.0.md).
 
 Default dependency images:
@@ -103,12 +104,20 @@ The Jasmin manifest labels map this digest to version `0.11.0` and source revisi
 connector identifiers, method, callback-configured state, and SMPP bind state; it never lists the
 configured callback URL.
 
-The reference SUT lives under `apps/`:
+The success-capable reference SUT combines:
 
-- `system-proof-ingestion-service`: Spring Boot HTTP ingress with Flyway-managed
+- a JVM `ReferenceRelayComponent` that binds as an SMPP transceiver, derives the callback only from
+  one received immediate UCS2 `deliver_sm`, waits for exact HTTP `200` plus exact `ACK/Jasmin`, and
+  only then emits the correlated status-zero `deliver_sm_resp`; and
+- `apps/system-proof-ingestion-service`: Spring Boot HTTP ingress with Flyway-managed
   `raw_sms_event` and `outbox_event` tables written in one transaction. It decodes Jasmin's UCS2
   `binary` form field at the HTTP boundary and returns `ACK/Jasmin` only after the transactional
   service call completes.
+
+The relay intentionally supports one concurrent, one-part UCS2 delivery plus
+`bind_transceiver`/response and `enquire_link`/response. Inputs and HTTP response framing are
+bounded, all socket operations have timeouts, and unsupported traffic fails closed without a
+positive SMPP acknowledgement. The reference topology needs neither RabbitMQ nor Redis.
 
 The logical `system-proof-smsc-simulator` component is implemented at runtime by a minimally
 adapted [`ukarim/smscsim`](https://github.com/ukarim/smscsim) fixture. Its Docker build is under

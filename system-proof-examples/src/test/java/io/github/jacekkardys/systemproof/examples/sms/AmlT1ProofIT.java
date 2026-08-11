@@ -7,10 +7,12 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
-import io.github.jacekkardys.systemproof.control.SemanticHoldState;
 import io.github.jacekkardys.systemproof.control.SemanticPredecessorGuardState;
+import io.github.jacekkardys.systemproof.examples.sms.environment.component.relay.ReferenceRelayOperations.Delivery;
+import io.github.jacekkardys.systemproof.examples.sms.environment.domain.SmsPersistence;
 import io.github.jacekkardys.systemproof.examples.sms.environment.domain.TestSms;
 import io.github.jacekkardys.systemproof.examples.sms.environment.proof.AmlT1Environment;
 import io.github.jacekkardys.systemproof.examples.sms.environment.proof.AmlT1ProofPoint;
@@ -25,7 +27,7 @@ import io.github.jacekkardys.systemproof.proof.ProofExecutionState;
 import io.github.jacekkardys.systemproof.proof.ProofOutcome;
 import io.github.jacekkardys.systemproof.proof.ProofResult;
 
-/** Direct AML T1 falsification and the independent early-HTTP negative control. */
+/** Direct AML T1 classification for the reference relay and pinned stock Jasmin. */
 @Tag("docker")
 final class AmlT1ProofIT {
 
@@ -60,39 +62,72 @@ final class AmlT1ProofIT {
         }
     }
 
-    @SystemProof(
-        value = AmlT1Environment.class,
-        title = "Direct AML T1 proof",
-        description = "Requires durable PostgreSQL commit before the correlated positive SMPP response"
-    )
-    void provesDirectCommitBeforePositiveSmppResponse(AmlT1Environment environment)
+    @Test
+    void provesDirectCommitBeforePositiveSmppResponseWithReferenceRelay()
         throws Exception {
-        TestSms message = proofMessage();
-        AmlT1ProofPoint proof = AmlT1ProofPoint.prepare(environment, message);
-        assertThat(proof.subject()).isNotNull();
-        assertThat(proof.correlationKey()).isNotNull();
-        assertThat(proof.commitHold().state()).isEqualTo(SemanticHoldState.DECLARED);
-        assertThat(proof.directGuard().state())
-            .isEqualTo(SemanticPredecessorGuardState.DECLARED);
-        assertDurability(proof);
+        try (AmlT1Environment environment = AmlT1Environment.referenceRelay()) {
+            environment.start();
+            TestSms message = proofMessage();
+            AmlT1ProofPoint proof = AmlT1ProofPoint.prepare(environment, message);
+            assertDirectProofDeclared(proof);
 
-        ProofExecution execution = environment.proofs().activate(proof.plan());
-        assertThat(execution.state()).isEqualTo(ProofExecutionState.ACTIVE);
-        ExecutorService stimulusExecutor = boundedStimulusExecutor();
+            ProofExecution execution = environment.proofs().activate(proof.plan());
+            assertThat(execution.state()).isEqualTo(ProofExecutionState.ACTIVE);
+            ExecutorService stimulusExecutor = boundedStimulusExecutor();
+            AtomicReference<Delivery> delivered = new AtomicReference<>();
+            try {
+                var stimulus = stimulusExecutor.submit(() -> execution.runStimulus(() -> {
+                    environment.smsc().send(message);
+                    delivered.set(environment.referenceRelayOperations().awaitDelivery());
+                }));
+                stimulus.get(AmlT1ProofPoint.TIMEOUT.toSeconds(), TimeUnit.SECONDS);
+                ProofResult result = proof.awaitDirectProof(execution);
+                SmsPersistence persistence = proof.assertDirectProof(execution, result);
+
+                assertThat(result.outcome()).isEqualTo(ProofOutcome.PROVED);
+                assertThat(delivered.get()).satisfies(value -> {
+                    assertThat(value.sequence()).isPositive();
+                    assertThat(value.sourceAddress()).isEqualTo(message.sourceAddress());
+                    assertThat(value.destinationAddress()).isEqualTo(message.destinationAddress());
+                    assertThat(value.dataCoding()).isEqualTo(8);
+                    assertThat(value.content()).isEqualTo(message.content());
+                    assertThat(value.callbackId()).isNotBlank().isNotEqualTo(message.id());
+                    assertThat(persistence.externalMessageId()).isEqualTo(value.callbackId());
+                });
+            } finally {
+                shutdown(stimulusExecutor);
+            }
+        }
+    }
+
+    @Test
+    void classifiesStockJasminAsDirectT1Violation() throws Exception {
+        ProofExecution execution;
         ProofResult result;
-        try {
-            stimulusExecutor.submit(() ->
-                execution.runStimulus(() -> environment.smsc().send(message))
-            );
-            result = proof.awaitDirectViolation(execution);
-            proof.assertDirectViolation(execution, result);
-        } finally {
-            shutdownAfterTerminal(stimulusExecutor);
+        try (AmlT1Environment environment = AmlT1Environment.stockJasmin()) {
+            environment.start();
+            TestSms message = proofMessage();
+            AmlT1ProofPoint proof = AmlT1ProofPoint.prepare(environment, message);
+            assertDirectProofDeclared(proof);
+
+            execution = environment.proofs().activate(proof.plan());
+            assertThat(execution.state()).isEqualTo(ProofExecutionState.ACTIVE);
+            ExecutorService stimulusExecutor = boundedStimulusExecutor();
+            try {
+                var stimulus = stimulusExecutor.submit(() ->
+                    execution.runStimulus(() -> environment.smsc().send(message))
+                );
+                stimulus.get(AmlT1ProofPoint.TIMEOUT.toSeconds(), TimeUnit.SECONDS);
+                result = proof.awaitDirectViolation(execution);
+                proof.assertDirectViolation(execution, result);
+                assertThat(result.outcome()).isEqualTo(ProofOutcome.VIOLATED);
+            } finally {
+                shutdown(stimulusExecutor);
+            }
         }
 
-        // This is the canonical invariant assertion. It intentionally remains red for a real
-        // counterexample; the exact VIOLATED result above must never be converted to success.
-        result.require(ProofOutcome.PROVED);
+        assertThat(execution.result()).isSameAs(result);
+        assertThat(execution.evaluate()).isSameAs(result);
     }
 
     @Test
@@ -128,6 +163,29 @@ final class AmlT1ProofIT {
         return TestSms.forProof(UUID.randomUUID().toString());
     }
 
+    private static void assertDirectProofDeclared(AmlT1ProofPoint proof) {
+        assertThat(proof.subject()).isNotNull();
+        assertThat(proof.correlationKey()).isNotNull();
+        assertThat(proof.plan().id().value())
+            .isEqualTo("aml-t1-direct-commit-before-positive-smpp");
+        assertThat(proof.plan().requirements())
+            .extracting(value -> value.id().value())
+            .containsExactly(
+                "postgresql-durability",
+                "postgresql-observation",
+                "smpp-observation",
+                "postgresql-transaction-correlation",
+                "smpp-exchange-correlation",
+                "t1-direct-commit-before-smpp-guard",
+                "t1-direct-commit-evidence",
+                "t1-direct-smpp-evidence",
+                "t1-direct-commit-before-smpp-relation"
+            );
+        assertThat(proof.directGuard().state())
+            .isEqualTo(SemanticPredecessorGuardState.DECLARED);
+        assertDurability(proof);
+    }
+
     private static void assertDurability(AmlT1ProofPoint proof) {
         assertThat(proof.durability().synchronousCommit()).isEqualTo(Setting.ON);
         assertThat(proof.durability().fsync()).isEqualTo(Setting.ON);
@@ -152,9 +210,4 @@ final class AmlT1ProofIT {
         assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
     }
 
-    private static void shutdownAfterTerminal(ExecutorService executor)
-        throws InterruptedException {
-        executor.shutdownNow();
-        executor.awaitTermination(10, TimeUnit.SECONDS);
-    }
 }

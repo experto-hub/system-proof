@@ -5,6 +5,7 @@ import static io.github.jacekkardys.systemproof.testcontainers.gateway.TcpEndpoi
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -24,6 +25,8 @@ import io.github.jacekkardys.systemproof.examples.sms.environment.component.jasm
 import io.github.jacekkardys.systemproof.examples.sms.environment.component.postgres.PostgresComponent;
 import io.github.jacekkardys.systemproof.examples.sms.environment.component.postgres.SmsDatabaseOperations;
 import io.github.jacekkardys.systemproof.examples.sms.environment.component.rabbitmq.RabbitMqComponent;
+import io.github.jacekkardys.systemproof.examples.sms.environment.component.relay.ReferenceRelayComponent;
+import io.github.jacekkardys.systemproof.examples.sms.environment.component.relay.ReferenceRelayOperations;
 import io.github.jacekkardys.systemproof.examples.sms.environment.component.redis.RedisComponent;
 import io.github.jacekkardys.systemproof.examples.sms.environment.component.smsc.SmscComponent;
 import io.github.jacekkardys.systemproof.examples.sms.environment.component.smsc.UkarimSmscOperations;
@@ -42,8 +45,9 @@ import io.github.jacekkardys.systemproof.smpp.SmppProtocolAdapter;
 import io.github.jacekkardys.systemproof.testcontainers.gateway.InteractionGateway;
 import io.github.jacekkardys.systemproof.testcontainers.gateway.ProtocolLimits;
 import io.github.jacekkardys.systemproof.topology.ConnectionId;
+import io.github.jacekkardys.systemproof.topology.RequiredPort;
 
-/** Real AML reference topology with required routed observation on every T1 proof connection. */
+/** Real AML T1 topologies with required routed observation on every proof connection. */
 public final class AmlT1Environment extends Environment {
     private static final ProtocolLimits POSTGRESQL_LIMITS = new ProtocolLimits(
         1024 * 1024,
@@ -59,10 +63,12 @@ public final class AmlT1Environment extends Environment {
     );
 
     private final SmscComponent smsc;
-    private final JasminComponent jasmin;
     private final SmsIngestionComponent ingestion;
     private final PostgresComponent database;
-    private final RabbitMqComponent broker;
+    private final RequiredPort<SmppEndpoint> smppClient;
+    private final RequiredPort<URI> httpClient;
+    private final Optional<ReferenceRelayComponent> referenceRelay;
+    private final List<String> credentials;
     private final SmppProtocolAdapter smppAdapter;
     private final HttpProtocolAdapter httpAdapter;
     private final PostgresqlProtocolAdapter postgresqlAdapter;
@@ -75,10 +81,12 @@ public final class AmlT1Environment extends Environment {
         EnvironmentLogging logging,
         ConnectionRouting routing,
         SmscComponent smsc,
-        JasminComponent jasmin,
         SmsIngestionComponent ingestion,
         PostgresComponent database,
-        RabbitMqComponent broker,
+        RequiredPort<SmppEndpoint> smppClient,
+        RequiredPort<URI> httpClient,
+        Optional<ReferenceRelayComponent> referenceRelay,
+        List<String> credentials,
         SmppProtocolAdapter smppAdapter,
         HttpProtocolAdapter httpAdapter,
         PostgresqlProtocolAdapter postgresqlAdapter,
@@ -88,10 +96,12 @@ public final class AmlT1Environment extends Environment {
     ) {
         super(topology, logging, routing);
         this.smsc = smsc;
-        this.jasmin = jasmin;
         this.ingestion = ingestion;
         this.database = database;
-        this.broker = broker;
+        this.smppClient = smppClient;
+        this.httpClient = httpClient;
+        this.referenceRelay = referenceRelay;
+        this.credentials = List.copyOf(credentials);
         this.smppAdapter = smppAdapter;
         this.httpAdapter = httpAdapter;
         this.postgresqlAdapter = postgresqlAdapter;
@@ -100,36 +110,56 @@ public final class AmlT1Environment extends Environment {
         this.postgresqlProfile = postgresqlProfile;
     }
 
-    /** Defines the canonical commit-before-acknowledgement reference application. */
+    /** Defines the pinned stock-Jasmin counterexample topology used by JUnit injection. */
     @EnvironmentDefinition
     public static AmlT1Environment define() {
+        return stockJasmin();
+    }
+
+    /** Defines pinned stock Jasmin 0.11.0 with the after-commit ingestion application. */
+    public static AmlT1Environment stockJasmin() {
         return build(
             new PostgresqlProtocolAdapter(SmsMessageFingerprint.rawWriteCorrelation()),
-            AcknowledgementMode.AFTER_COMMIT
+            AcknowledgementMode.AFTER_COMMIT,
+            SutVariant.STOCK_JASMIN
         );
     }
 
-    /** Defines the same observed topology with a caller-owned PostgreSQL adapter. */
+    /** Defines stock Jasmin with a caller-owned PostgreSQL adapter. */
     public static AmlT1Environment observed(PostgresqlProtocolAdapter postgresqlAdapter) {
-        return build(postgresqlAdapter, AcknowledgementMode.AFTER_COMMIT);
+        return build(
+            postgresqlAdapter,
+            AcknowledgementMode.AFTER_COMMIT,
+            SutVariant.STOCK_JASMIN
+        );
+    }
+
+    /** Defines the success-capable synchronous reference SMPP-to-HTTP relay. */
+    public static AmlT1Environment referenceRelay() {
+        return build(
+            new PostgresqlProtocolAdapter(SmsMessageFingerprint.rawWriteCorrelation()),
+            AcknowledgementMode.AFTER_COMMIT,
+            SutVariant.REFERENCE_RELAY
+        );
     }
 
     /** Defines the explicit test-only counterexample that acknowledges before commit. */
     public static AmlT1Environment earlyAcknowledging() {
         return build(
             new PostgresqlProtocolAdapter(SmsMessageFingerprint.rawWriteCorrelation()),
-            AcknowledgementMode.BEFORE_COMMIT
+            AcknowledgementMode.BEFORE_COMMIT,
+            SutVariant.STOCK_JASMIN
         );
     }
 
     private static AmlT1Environment build(
         PostgresqlProtocolAdapter postgresqlAdapter,
-        AcknowledgementMode acknowledgementMode
+        AcknowledgementMode acknowledgementMode,
+        SutVariant sutVariant
     ) {
         EnvironmentConfiguration configuration = EnvironmentConfiguration.system();
         EnvironmentBuilder builder = new EnvironmentBuilder(configuration);
         SmscComponent smsc = builder.component(SmscComponent.class);
-        JasminComponent jasmin = builder.component(JasminComponent.class);
         SmsIngestionConfig ingestionConfiguration = configuration.bind(
             SmsIngestionConfig.class
         );
@@ -145,15 +175,13 @@ public final class AmlT1Environment extends Environment {
             )
         );
         PostgresComponent database = builder.component(PostgresComponent.class);
-        RabbitMqComponent broker = builder.component(RabbitMqComponent.class);
-        RedisComponent state = builder.component(RedisComponent.class);
+        SutTopology sut = switch (sutVariant) {
+            case STOCK_JASMIN -> addStockJasmin(builder, smsc, ingestion);
+            case REFERENCE_RELAY -> addReferenceRelay(builder, smsc, ingestion);
+        };
         builder
             .logging(EnvironmentLogging.logs().defaultComponentLevel(LogLevel.OFF))
-            .connect(jasmin.smpp(), smsc.smpp())
-            .connect(jasmin.sms(), ingestion.sms())
-            .connect(ingestion.jdbc(), database.jdbc())
-            .connect(jasmin.amqp(), broker.amqp())
-            .connect(jasmin.redis(), state.redis());
+            .connect(ingestion.jdbc(), database.jdbc());
 
         SmppProtocolAdapter smppAdapter = new SmppProtocolAdapter(
             SmsMessageFingerprint.smppDeliverCorrelation()
@@ -175,7 +203,7 @@ public final class AmlT1Environment extends Environment {
         );
         InteractionGateway gateway = new InteractionGateway();
         ConnectionRouting routing = ConnectionRouting.routed(
-            jasmin.smpp().contract(),
+            sut.smpp().contract(),
             smppProfile,
             gateway.tcp(
                 endpoint(AmlT1Environment::smppAddress, AmlT1Environment::replaceSmppAddress),
@@ -183,7 +211,7 @@ public final class AmlT1Environment extends Environment {
                 SMPP_LIMITS
             )
         ).withRoute(
-            jasmin.sms().contract(),
+            sut.sms().contract(),
             httpProfile,
             gateway.tcp(
                 endpoint(AmlT1Environment::httpAddress, AmlT1Environment::replaceHttpAddress),
@@ -202,15 +230,22 @@ public final class AmlT1Environment extends Environment {
                 POSTGRESQL_LIMITS
             )
         );
+        List<String> credentials = new ArrayList<>(List.of(
+            smsc.configuration().password().reveal(),
+            database.configuration().password().reveal()
+        ));
+        credentials.addAll(sut.additionalCredentials());
         return builder.build((topology, logging) -> new AmlT1Environment(
             topology,
             logging,
             routing,
             smsc,
-            jasmin,
             ingestion,
             database,
-            broker,
+            sut.smpp(),
+            sut.sms(),
+            sut.referenceRelay(),
+            credentials,
             smppAdapter,
             httpAdapter,
             postgresqlAdapter,
@@ -218,6 +253,47 @@ public final class AmlT1Environment extends Environment {
             httpProfile,
             postgresqlProfile
         ));
+    }
+
+    private static SutTopology addStockJasmin(
+        EnvironmentBuilder builder,
+        SmscComponent smsc,
+        SmsIngestionComponent ingestion
+    ) {
+        JasminComponent jasmin = builder.component(JasminComponent.class);
+        RabbitMqComponent broker = builder.component(RabbitMqComponent.class);
+        RedisComponent state = builder.component(RedisComponent.class);
+        builder
+            .connect(jasmin.smpp(), smsc.smpp())
+            .connect(jasmin.sms(), ingestion.sms())
+            .connect(jasmin.amqp(), broker.amqp())
+            .connect(jasmin.redis(), state.redis());
+        return new SutTopology(
+            jasmin.smpp(),
+            jasmin.sms(),
+            Optional.empty(),
+            List.of(
+                jasmin.configuration().adminPassword().reveal(),
+                broker.configuration().password().reveal()
+            )
+        );
+    }
+
+    private static SutTopology addReferenceRelay(
+        EnvironmentBuilder builder,
+        SmscComponent smsc,
+        SmsIngestionComponent ingestion
+    ) {
+        ReferenceRelayComponent relay = ReferenceRelayComponent.create();
+        builder.components(relay)
+            .connect(relay.smpp(), smsc.smpp())
+            .connect(relay.sms(), ingestion.sms());
+        return new SutTopology(
+            relay.smpp(),
+            relay.sms(),
+            Optional.of(relay),
+            List.of()
+        );
     }
 
     public UkarimSmscOperations smsc() {
@@ -228,12 +304,18 @@ public final class AmlT1Environment extends Environment {
         return operations(database);
     }
 
+    public ReferenceRelayOperations referenceRelayOperations() {
+        return operations(referenceRelay.orElseThrow(() -> new IllegalStateException(
+            "This AML T1 topology does not contain the reference relay"
+        )));
+    }
+
     public ConnectionId smppConnectionId() {
-        return connectionFrom(jasmin.smpp()).id();
+        return connectionFrom(smppClient).id();
     }
 
     public ConnectionId httpConnectionId() {
-        return connectionFrom(jasmin.sms()).id();
+        return connectionFrom(httpClient).id();
     }
 
     public ConnectionId databaseConnectionId() {
@@ -265,12 +347,7 @@ public final class AmlT1Environment extends Environment {
     }
 
     public List<String> credentials() {
-        return List.of(
-            smsc.configuration().password().reveal(),
-            jasmin.configuration().adminPassword().reveal(),
-            database.configuration().password().reveal(),
-            broker.configuration().password().reveal()
-        );
+        return credentials;
     }
 
     private static RequiredObservationProfile requiredProfile(
@@ -343,4 +420,16 @@ public final class AmlT1Environment extends Environment {
     ) {
         return new SmppEndpoint(host, port, endpoint.systemId(), endpoint.password());
     }
+
+    private enum SutVariant {
+        STOCK_JASMIN,
+        REFERENCE_RELAY
+    }
+
+    private record SutTopology(
+        RequiredPort<SmppEndpoint> smpp,
+        RequiredPort<URI> sms,
+        Optional<ReferenceRelayComponent> referenceRelay,
+        List<String> additionalCredentials
+    ) {}
 }

@@ -10,7 +10,7 @@
 Stock pinned Jasmin violates the direct AML T1 invariant:
 
 ```text
-PostgreSQL CommitSucceeded.OBSERVED
+PostgreSQL CommitSucceeded.CONFIRMED
     MUST HAPPEN BEFORE
 SMPP positive deliver_sm_resp.OBSERVED
 ```
@@ -246,3 +246,40 @@ Use **Outcome A** for issue #13 and PR #68: stock pinned Jasmin genuinely violat
 Record the deterministic falsification as the issue result. Do not close issue #13, merge the pull
 request, change Jasmin/application behavior, or weaken the direct obligation as part of this
 investigation.
+
+## PoC closure follow-up: success-capable reference relay
+
+The 2026-08-11 follow-up preserves the investigation above: pinned stock Jasmin remains a real
+counterexample. It adds a separate success-capable JVM relay and closes the PoC classification pair
+without changing the invariant, proof plan ID, guard ID, causal-relation ID, selectors, boundaries,
+fingerprint, or correlation types.
+
+The canonical direct plan now runs naturally without a `CommitAttempt` hold. It requires:
+
+```text
+PostgreSQL CommitSucceeded.CONFIRMED
+    MUST HAPPEN BEFORE
+correlated positive SMPP deliver_sm_resp.OBSERVED
+```
+
+The reference topology is `SMSCsim -> synchronous reference relay -> ingestion -> PostgreSQL`. The
+relay parses the real `deliver_sm`, constructs the HTTP callback from those bytes, waits for exact
+status `200` and exact body `ACK/Jasmin`, and only then sends one status-zero `deliver_sm_resp` with
+the received SMPP sequence. This topology reaches `PROVED`; all plan requirements are satisfied,
+the guard and causal relation retain matching commit/SMPP provenance, and independent database
+reads see one RAW row plus one Outbox row with their shared aggregate ID and matching payload.
+
+The stock-Jasmin topology uses the same `AmlT1ProofPoint.prepare(...)` and reaches the authoritative
+`VIOLATED` classification. Its decisive frozen provenance contains the correlated positive SMPP
+successor and no matching commit predecessor. Later ingestion completion and environment cleanup
+do not change that result.
+
+`prepareCommitHoldExperiment(...)` remains separate. It still characterizes the deterministic
+held state with one matching `CommitAttempt`, no matching `CommitSucceeded`, zero visible RAW and
+Outbox rows, and one positive SMPP response. Its plan contains no causal-relation obligation and
+therefore does not express a business verdict about direct T1.
+
+The complete `AmlT1ProofIT` class was executed in ten fresh Maven runs. The reference-relay case
+reached `PROVED` 10/10, the stock-Jasmin case reached `VIOLATED` 10/10, and the separate held-commit
+experiment reproduced its expected state 10/10. All four tests in the class passed in every run;
+there were no failures or errors.

@@ -26,6 +26,7 @@ import io.github.jacekkardys.systemproof.journal.SemanticPredecessorGuardEvent;
 import io.github.jacekkardys.systemproof.observation.EvidenceCodec;
 import io.github.jacekkardys.systemproof.observation.FlowDirection;
 import io.github.jacekkardys.systemproof.observation.ForwardingDecision;
+import io.github.jacekkardys.systemproof.observation.InteractionRef;
 import io.github.jacekkardys.systemproof.postgresql.PostgresqlDurabilityRequirements;
 import io.github.jacekkardys.systemproof.postgresql.PostgresqlDurabilityRequirements.Table;
 import io.github.jacekkardys.systemproof.postgresql.PostgresqlDurabilityResult;
@@ -46,6 +47,7 @@ import io.github.jacekkardys.systemproof.proof.ProofPrerequisite;
 import io.github.jacekkardys.systemproof.proof.ProofResolution;
 import io.github.jacekkardys.systemproof.proof.ProofResolutionReason;
 import io.github.jacekkardys.systemproof.proof.ProofResult;
+import io.github.jacekkardys.systemproof.proof.ProofStimulusState;
 import io.github.jacekkardys.systemproof.proof.ProofSubjectRef;
 import io.github.jacekkardys.systemproof.smpp.SmppEvidence;
 import io.github.jacekkardys.systemproof.smpp.SmppEvidence.DeliverSmResponseCompleted;
@@ -75,18 +77,15 @@ public final class AmlT1ProofPoint {
         ));
 
     private final ProofContext context;
-    private final SemanticHold commitHold;
     private final SemanticPredecessorGuard directGuard;
     private final ProofPlan plan;
 
     private AmlT1ProofPoint(
         ProofContext context,
-        SemanticHold commitHold,
         SemanticPredecessorGuard directGuard,
         ProofPlan plan
     ) {
         this.context = context;
-        this.commitHold = commitHold;
         this.directGuard = directGuard;
         this.plan = plan;
     }
@@ -94,10 +93,6 @@ public final class AmlT1ProofPoint {
     /** Declares the authoritative direct CommitSucceeded -> positive SMPP relation. */
     public static AmlT1ProofPoint prepare(AmlT1Environment environment, TestSms message) {
         ProofContext context = ProofContext.create(environment, message);
-        SemanticHold commitHold = environment.controls().declareHold(
-            context.commitAttempt(),
-            TIMEOUT
-        );
         SemanticPredecessorGuard directGuard = environment.controls().declareGuard(
             SemanticPredecessorGuardSpec.requiring(
                 context.subject,
@@ -109,13 +104,6 @@ public final class AmlT1ProofPoint {
         ProofPlan plan = context.directPlan(
             "aml-t1-direct-commit-before-positive-smpp",
             "Direct AML T1 proof"
-        ).control(
-            "t1-direct-commit-hold-forwarded",
-            commitHold,
-            SemanticHoldState.FORWARDED
-        ).evidence(
-            "t1-direct-commit-held-evidence",
-            commitHold
         ).control(
             T1_DIRECT_GUARD,
             directGuard,
@@ -132,7 +120,7 @@ public final class AmlT1ProofPoint {
             T1_DIRECT_RELATION,
             directGuard
         ).build();
-        return new AmlT1ProofPoint(context, commitHold, directGuard, plan);
+        return new AmlT1ProofPoint(context, directGuard, plan);
     }
 
     /** Declares a non-verdict experiment that captures both sides at a held commit. */
@@ -267,16 +255,20 @@ public final class AmlT1ProofPoint {
         return context.durability();
     }
 
-    public SemanticHold commitHold() {
-        return commitHold;
-    }
-
     public SemanticPredecessorGuard directGuard() {
         return directGuard;
     }
 
     public ProofPlan plan() {
         return plan;
+    }
+
+    public ProofResult awaitDirectProof(ProofExecution execution) throws Exception {
+        assertThat(directGuard.completion().toCompletableFuture().get(
+            TIMEOUT.toSeconds(),
+            TimeUnit.SECONDS
+        )).isEqualTo(SemanticPredecessorGuardState.SATISFIED);
+        return execution.evaluate();
     }
 
     public ProofResult awaitDirectViolation(ProofExecution execution) throws Exception {
@@ -299,14 +291,21 @@ public final class AmlT1ProofPoint {
             T1_DIRECT_RELATION,
             context.environment.smppConnectionId()
         );
-        assertThat(context.environment.database().snapshot(context.message)).satisfies(value -> {
-            assertThat(value.rawCount()).isZero();
-            assertThat(value.outboxCount()).isZero();
-        });
+        context.assertDecisivePositiveSmpp(result, T1_DIRECT_GUARD);
         context.assertMatchingPositiveSmpp();
         assertThat(execution.result()).isSameAs(result);
         assertThat(execution.evaluate()).isSameAs(result);
         context.assertSecretSafe(result);
+    }
+
+    /** Verifies the complete direct T1 proof and returns the independent persistence read. */
+    public SmsPersistence assertDirectProof(ProofExecution execution, ProofResult result) {
+        context.assertCoverage(execution, result, plan);
+        assertThat(directGuard.state()).isEqualTo(SemanticPredecessorGuardState.SATISFIED);
+        DirectAttribution attribution = context.awaitDirectAttribution();
+        context.assertDirectSatisfied(directGuard, result, attribution);
+        context.assertMatchingPositiveSmpp(attribution.smpp());
+        return context.awaitVisiblePersistence();
     }
 
     /** Controlled state witness; it deliberately contains no causal verdict obligation. */
@@ -725,10 +724,14 @@ public final class AmlT1ProofPoint {
         }
 
         private void assertMatchingPositiveSmpp() {
+            assertMatchingPositiveSmpp(awaitUniqueSmpp());
+        }
+
+        private SmppExchangeRef awaitUniqueSmpp() {
             Awaitility.await("unique SMPP attribution")
                 .atMost(TIMEOUT)
                 .until(() -> unique(SmppExchangeRef.codec()));
-            assertMatchingPositiveSmpp(uniqueCorrelation(SmppExchangeRef.codec()));
+            return uniqueCorrelation(SmppExchangeRef.codec());
         }
 
         private void assertMatchingPositiveSmpp(SmppExchangeRef exchange) {
@@ -738,6 +741,91 @@ public final class AmlT1ProofPoint {
                     && response.acknowledgement()
                         == SmppEvidence.Acknowledgement.POSITIVE)
                 .hasSize(1);
+        }
+
+        private void assertDirectSatisfied(
+            SemanticPredecessorGuard guard,
+            ProofResult result,
+            DirectAttribution attribution
+        ) {
+            List<SemanticPredecessorGuardEvent> terminal = guardEvents(guard).stream()
+                .filter(value -> value.kind() == SemanticPredecessorGuardEvent.Kind.TERMINAL)
+                .filter(value -> value.state() == SemanticPredecessorGuardState.SATISFIED)
+                .toList();
+            assertThat(terminal).singleElement();
+            InteractionRef predecessor = terminal.get(0).predecessor().orElseThrow();
+            InteractionRef successor = terminal.get(0).successor().orElseThrow();
+
+            PostgresqlEvidence predecessorEvidence = evidenceAt(
+                predecessor,
+                environment.postgresqlAdapter().evidenceCodec()
+            );
+            assertThat(predecessorEvidence).isInstanceOf(CommitSucceeded.class);
+            assertThat(((CommitSucceeded) predecessorEvidence).transaction())
+                .isEqualTo(attribution.transaction());
+
+            SmppEvidence successorEvidence = evidenceAt(
+                successor,
+                environment.smppAdapter().evidenceCodec()
+            );
+            assertThat(successorEvidence).isInstanceOf(DeliverSmResponseCompleted.class);
+            DeliverSmResponseCompleted response = (DeliverSmResponseCompleted) successorEvidence;
+            assertThat(response.exchange()).isEqualTo(attribution.smpp());
+            assertThat(response.acknowledgement())
+                .isEqualTo(SmppEvidence.Acknowledgement.POSITIVE);
+
+            assertThat(postgresqlEvidence())
+                .filteredOn(value -> value instanceof CommitSucceeded succeeded
+                    && succeeded.transaction().equals(attribution.transaction()))
+                .hasSize(1);
+            assertSatisfiedResolution(
+                result,
+                T1_DIRECT_GUARD,
+                ProofResolutionReason.CONTROL_REACHED_EXPECTED_STATE,
+                List.of(
+                    ProofInteractionProvenance.predecessor(predecessor),
+                    ProofInteractionProvenance.successor(successor)
+                )
+            );
+            assertSatisfiedResolution(
+                result,
+                "t1-direct-commit-evidence",
+                ProofResolutionReason.EVIDENCE_PRESENT,
+                List.of(ProofInteractionProvenance.predecessor(predecessor))
+            );
+            assertSatisfiedResolution(
+                result,
+                "t1-direct-smpp-evidence",
+                ProofResolutionReason.EVIDENCE_PRESENT,
+                List.of(ProofInteractionProvenance.successor(successor))
+            );
+            assertSatisfiedResolution(
+                result,
+                T1_DIRECT_RELATION,
+                ProofResolutionReason.CAUSAL_RELATION_ESTABLISHED,
+                List.of(
+                    ProofInteractionProvenance.predecessor(predecessor),
+                    ProofInteractionProvenance.successor(successor)
+                )
+            );
+        }
+
+        private void assertDecisivePositiveSmpp(ProofResult result, String guardId) {
+            SmppExchangeRef exchange = awaitUniqueSmpp();
+            ProofObligationResolution decisive = resolution(result, guardId);
+            assertThat(result.decisiveResolution().orElseThrow()).isSameAs(decisive);
+            assertThat(decisive.provenance()).singleElement().satisfies(value -> {
+                assertProvenance(value, Role.SUCCESSOR, environment.smppConnectionId());
+                SmppEvidence evidence = evidenceAt(
+                    value.interaction(),
+                    environment.smppAdapter().evidenceCodec()
+                );
+                assertThat(evidence).isInstanceOf(DeliverSmResponseCompleted.class);
+                DeliverSmResponseCompleted response = (DeliverSmResponseCompleted) evidence;
+                assertThat(response.exchange()).isEqualTo(exchange);
+                assertThat(response.acknowledgement())
+                    .isEqualTo(SmppEvidence.Acknowledgement.POSITIVE);
+            });
         }
 
         private void awaitCommitSucceeded(TransactionRef transaction) {
@@ -806,6 +894,10 @@ public final class AmlT1ProofPoint {
         ) {
             result.require(ProofOutcome.PROVED);
             assertThat(result.primarySubject()).isEqualTo(subject);
+            assertThat(result.stimulus().state()).isEqualTo(ProofStimulusState.COMPLETED);
+            assertThat(result.stimulus().resolution()).isEqualTo(ProofResolution.SATISFIED);
+            assertThat(result.stimulus().reason())
+                .isEqualTo(ProofResolutionReason.STIMULUS_COMPLETED);
             assertThat(result.resolutions()).hasSameSizeAs(plan.requirements())
                 .allMatch(value -> value.resolution() == ProofResolution.SATISFIED);
             assertThat(execution.result()).isSameAs(result);
@@ -848,6 +940,19 @@ public final class AmlT1ProofPoint {
                 .filter(value -> value.evidence().schemaId().equals(codec.schemaId()))
                 .map(value -> value.evidence().decode(codec))
                 .toList();
+        }
+
+        private <T> T evidenceAt(InteractionRef interaction, EvidenceCodec<T> codec) {
+            List<T> matches = environment.journalSnapshot().entries().stream()
+                .map(value -> value.event())
+                .filter(InteractionObservationEvent.class::isInstance)
+                .map(InteractionObservationEvent.class::cast)
+                .filter(value -> value.interactionRef().equals(interaction))
+                .filter(value -> value.evidence().schemaId().equals(codec.schemaId()))
+                .map(value -> value.evidence().decode(codec))
+                .toList();
+            assertThat(matches).singleElement();
+            return matches.get(0);
         }
 
         private List<SemanticPredecessorGuardEvent> guardEvents(
@@ -898,6 +1003,18 @@ public final class AmlT1ProofPoint {
     ) {
         assertThat(provenance.role()).isEqualTo(role);
         assertThat(provenance.interaction().connectionId()).isEqualTo(connectionId);
+    }
+
+    private static void assertSatisfiedResolution(
+        ProofResult result,
+        String id,
+        ProofResolutionReason reason,
+        List<ProofInteractionProvenance> provenance
+    ) {
+        ProofObligationResolution resolution = resolution(result, id);
+        assertThat(resolution.resolution()).isEqualTo(ProofResolution.SATISFIED);
+        assertThat(resolution.reason()).isEqualTo(reason);
+        assertThat(resolution.provenance()).containsExactlyElementsOf(provenance);
     }
 
     private static ProofObligationResolution resolution(ProofResult result, String id) {

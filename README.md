@@ -546,7 +546,9 @@ Traffic that matches no armed hold or predecessor guard receives an immediate fo
 Semantic holds and predecessor guards share the coordinator. The AML issue #13 investigation uses
 that API to keep the direct `CommitSucceeded -> positive deliver_sm_resp` obligation separate from
 the stronger HTTP-to-SMPP architectural hypothesis. Pinned stock Jasmin 0.11.0 deterministically
-violates the direct obligation; see the
+violates the direct obligation. The examples now also include a synchronous JVM reference relay
+that reaches `PROVED` with the exact same direct plan; the held-commit state remains a separate
+non-verdict characterization. See the
 [`AML T1 investigation`](docs/investigations/aml-t1-jasmin-0.11.0.md).
 
 Core invokes the codec synchronously, copies the encoded bytes into a private `EvidenceSnapshot`,
