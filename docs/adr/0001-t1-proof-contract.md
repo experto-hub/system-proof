@@ -106,3 +106,10 @@ system-proof-examples -> system-proof-junit5        -> system-proof-core
   fault injection remain separate roadmap tasks.
 - A future T1 test that lacks any required evidence above is incomplete even if it is repeatably
   green.
+- The issue #13 investigation against pinned stock Jasmin 0.11.0 produced a deterministic direct
+  counterexample rather than a proof. The exact source path, controlled evidence, and separation
+  from the stronger HTTP-to-SMPP hypothesis are recorded in
+  [`docs/investigations/aml-t1-jasmin-0.11.0.md`](../investigations/aml-t1-jasmin-0.11.0.md).
+- The PoC closure adds a minimal synchronous reference SMPP-to-HTTP relay. The canonical direct T1
+  plan runs without a commit hold and classifies that relay as `PROVED` while classifying unchanged
+  stock Jasmin as `VIOLATED`. The commit hold remains only in a separate characterization plan.

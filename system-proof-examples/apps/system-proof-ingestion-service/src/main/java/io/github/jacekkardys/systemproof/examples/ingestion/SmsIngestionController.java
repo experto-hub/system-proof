@@ -8,10 +8,10 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 public class SmsIngestionController {
-    private final SmsIngestionService service;
+    private final SmsAcknowledgementStrategy acknowledgementStrategy;
 
-    public SmsIngestionController(SmsIngestionService service) {
-        this.service = service;
+    public SmsIngestionController(SmsAcknowledgementStrategy acknowledgementStrategy) {
+        this.acknowledgementStrategy = acknowledgementStrategy;
     }
 
     @PostMapping(
@@ -20,7 +20,7 @@ public class SmsIngestionController {
         produces = MediaType.TEXT_PLAIN_VALUE
     )
     public String ingest(@RequestParam MultiValueMap<String, String> form) {
-        service.ingest(JasminSmsCallback.from(form).toCommand());
+        acknowledgementStrategy.ingest(JasminSmsCallback.from(form).toCommand());
         return "ACK/Jasmin";
     }
 }
