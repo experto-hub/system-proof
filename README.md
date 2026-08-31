@@ -663,3 +663,18 @@ request branches are verified by their push runs. External contributors can run 
 verify` locally; a maintainer must reproduce accepted changes on an organization-controlled branch
 before trusted CI verification. Third-party source, license, pin, and patch details are recorded in
 [`docs/third-party.md`](docs/third-party.md).
+
+### Branch and review policy
+
+`develop` is the default integration branch. Feature and maintenance pull requests target
+`develop`; release pull requests promote the exact reviewed `develop` head to `main`. Both branches
+are protected against direct updates, force pushes, and deletion. A pull request, the strict
+`Java 21 full verification` check on its exact head, and resolution of review conversations are
+required before either branch can advance. Repository merges use merge commits so promotion
+ancestry remains explicit.
+
+[`CODEOWNERS`](.github/CODEOWNERS) automatically requests the repository owner, and the configured
+Codex integration automatically reviews pull requests. Codex reviews are advisory GitHub reviews,
+not approvals. While the repository has only one human maintainer, branch protection therefore
+requires zero approving reviews: GitHub does not allow an author to approve their own pull request.
+Enable one required code-owner approval when a second maintainer is available.
