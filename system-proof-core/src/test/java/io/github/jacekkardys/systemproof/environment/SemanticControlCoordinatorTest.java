@@ -15,7 +15,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import io.github.jacekkardys.systemproof.control.SemanticHold;
 import io.github.jacekkardys.systemproof.control.SemanticHoldFailure;
 import io.github.jacekkardys.systemproof.control.SemanticInteractionSelector;
@@ -119,17 +118,16 @@ class SemanticControlCoordinatorTest {
         SemanticHold hold = fixture.coordinator.arm(selector("target"), MAXIMUM_HOLD);
         assertThat(hold.state()).isEqualTo(SemanticHoldState.ARMED);
         assertThat(hold.release().toCompletableFuture()).isCompletedExceptionally();
-        AtomicBoolean journalContainedReachedAtSignal = new AtomicBoolean();
-        hold.reached().thenRun(() -> journalContainedReachedAtSignal.set(
+        var journalContainedReachedAtSignal = hold.reached().thenApply(ignored ->
             events(fixture).stream()
                 .anyMatch(event -> event.state() == SemanticHoldState.REACHED_HELD)
-        ));
+        );
 
         ForwardingPermit permit = fixture.coordinator.permit(interaction("target", 1));
 
         assertThat(hold.state()).isEqualTo(SemanticHoldState.REACHED_HELD);
         assertThat(await(hold.reached())).isEqualTo(interactionRef(1));
-        assertThat(journalContainedReachedAtSignal).isTrue();
+        assertThat(await(journalContainedReachedAtSignal)).isTrue();
         assertThat(fixture.scheduler.activeTasks()).isEqualTo(1);
 
         var release = hold.release();

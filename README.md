@@ -638,9 +638,54 @@ image or manually provisioned local tag is required.
 
 ## Continuous integration
 
-The `Verify` workflow runs `./mvnw clean verify` with Java 21 and Docker on a GitHub-hosted Ubuntu
-runner. The same job executes unit and architecture tests, the Docker integration tests including
-the interaction gateway proof, builds the reference ingestion application and adapted SMSC
-fixture, and runs the complete topology smoke. Third-party source, license, pin, and patch details
-are recorded in
+The trusted `Verify` workflow runs on the ProArt runner labels `[self-hosted, linux, x64, proart]`
+for pushes to branches in `experto-hub/system-proof` and for authorized manual dispatches. The job
+uses the digest-pinned
+`ghcr.io/experto-hub/ci-java21@sha256:2e92bf86bbb59cf1ae1447bdeca327909ac160885da4600ff051ef1bfbf6d56d`
+image. Java 21 remains the required project and compiler version, while the repository's Maven
+Wrapper remains the sole Maven version owner.
+
+The job mounts only the ProArt Docker socket required by Testcontainers. It uses
+`DOCKER_HOST=unix:///var/run/docker.sock` and `host.docker.internal` host-gateway resolution so
+containers and mapped ports are reachable from the Java job container. The same job executes unit
+and architecture tests, Docker integration tests including the interaction gateway proof, builds
+the reference ingestion application and adapted SMSC fixture, and runs the complete topology
+smoke. Testcontainers' resource reaper remains enabled, and CI verifies that Testcontainers
+containers and networks return to the pre-build baseline. CI supplies the Maven and test JVMs with
+docker-java API version 1.40, the minimum accepted by the ProArt daemon, without changing the
+canonical Wrapper command or the project's managed dependencies.
+
+Docker verification is serialized across repository refs because the reference image builds use
+shared local tags on the persistent ProArt daemon. A named daemon-scoped lock container retains the
+full queue instead of relying on GitHub Actions concurrency, which keeps only one pending run. The
+lock helper watches the owning job container through the Docker API and removes itself if that job
+stops; an `always()` step releases it normally after Testcontainers cleanup. A waiter reclaims a
+non-running lock after the recorded owning job container has stopped or disappeared, or after a
+bounded 60-second helper-start grace. Every lock also has a 25-minute maximum lease, while the
+Maven verification step has a 20-minute limit. The five-minute margin lets a later run recover a
+running helper whose runner and job container were orphaned. On lease expiry, the waiter first
+stops the digest-verified owner job container and then reclaims its helper, so abandoned Maven work
+cannot overlap a later verification. The 110-minute job limit retains four active ProArt jobs at
+their maximum lease duration, including setup and cleanup margin.
+
+The workflow deliberately has no `pull_request` trigger. Untrusted fork code never runs on ProArt,
+receives private package access, or obtains the ProArt Docker socket. Organization-owned pull
+request branches are verified by their push runs. External contributors can run `./mvnw clean
+verify` locally; a maintainer must reproduce accepted changes on an organization-controlled branch
+before trusted CI verification. Third-party source, license, pin, and patch details are recorded in
 [`docs/third-party.md`](docs/third-party.md).
+
+### Branch and review policy
+
+`develop` is the default integration branch. Feature and maintenance pull requests target
+`develop`; release pull requests promote the exact reviewed `develop` head to `main`. Both branches
+are protected against direct updates, force pushes, and deletion. A pull request, the strict
+`Java 21 full verification` check on its exact head, and resolution of review conversations are
+required before either branch can advance. Repository merges use merge commits so promotion
+ancestry remains explicit.
+
+[`CODEOWNERS`](.github/CODEOWNERS) automatically requests the repository owner, and the configured
+Codex integration automatically reviews pull requests. Codex reviews are advisory GitHub reviews,
+not approvals. While the repository has only one human maintainer, branch protection therefore
+requires zero approving reviews: GitHub does not allow an author to approve their own pull request.
+Enable one required code-owner approval when a second maintainer is available.
