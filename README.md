@@ -651,7 +651,9 @@ containers and mapped ports are reachable from the Java job container. The same 
 and architecture tests, Docker integration tests including the interaction gateway proof, builds
 the reference ingestion application and adapted SMSC fixture, and runs the complete topology
 smoke. Testcontainers' resource reaper remains enabled, and CI verifies that Testcontainers
-containers and networks return to the pre-build baseline.
+containers and networks return to the pre-build baseline. Maven supplies docker-java with API
+version 1.40, the minimum accepted by the ProArt daemon, without changing the canonical Wrapper
+command or the project's managed dependencies.
 
 Docker verification is temporarily serialized across all repository refs because the reference
 image builds use shared local tags on the persistent ProArt daemon. Runs are queued rather than

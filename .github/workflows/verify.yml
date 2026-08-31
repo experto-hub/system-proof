@@ -26,6 +26,7 @@ jobs:
         password: ${{ github.token }}
       env:
         DOCKER_HOST: unix:///var/run/docker.sock
+        MAVEN_OPTS: -Dapi.version=1.40
         TESTCONTAINERS_HOST_OVERRIDE: host.docker.internal
         TESTCONTAINERS_RYUK_DISABLED: "false"
       volumes:
@@ -64,6 +65,8 @@ jobs:
           test -r /var/run/docker.sock
           test -w /var/run/docker.sock
           test "$(curl --fail --silent --show-error --unix-socket /var/run/docker.sock http://localhost/_ping)" = "OK"
+          test "$MAVEN_OPTS" = "-Dapi.version=1.40"
+          test "$(curl --fail --silent --show-error --unix-socket /var/run/docker.sock http://localhost/v1.40/_ping)" = "OK"
 
           container_json="$(
             curl --fail --silent --show-error \
@@ -101,6 +104,7 @@ jobs:
           echo "javac version: ${javac_version}"
           echo "CI image: ${expected_image}"
           echo "Docker daemon: reachable through ${DOCKER_HOST}"
+          echo "Docker API version: 1.40"
           echo "Testcontainers host override: ${TESTCONTAINERS_HOST_OVERRIDE}"
 
       - name: Run unit, integration, and full-topology smoke tests
