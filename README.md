@@ -665,8 +665,8 @@ bounded 60-second helper-start grace. Every lock also has a 25-minute maximum le
 Maven verification step has a 20-minute limit. The five-minute margin lets a later run recover a
 running helper whose runner and job container were orphaned. On lease expiry, the waiter first
 stops the digest-verified owner job container and then reclaims its helper, so abandoned Maven work
-cannot overlap a later verification. The 90-minute job limit retains up to four waiting ProArt jobs
-at their bounded Maven duration.
+cannot overlap a later verification. The 110-minute job limit retains four active ProArt jobs at
+their maximum lease duration, including setup and cleanup margin.
 
 The workflow deliberately has no `pull_request` trigger. Untrusted fork code never runs on ProArt,
 receives private package access, or obtains the ProArt Docker socket. Organization-owned pull
