@@ -638,9 +638,28 @@ image or manually provisioned local tag is required.
 
 ## Continuous integration
 
-The `Verify` workflow runs `./mvnw clean verify` with Java 21 and Docker on a GitHub-hosted Ubuntu
-runner. The same job executes unit and architecture tests, the Docker integration tests including
-the interaction gateway proof, builds the reference ingestion application and adapted SMSC
-fixture, and runs the complete topology smoke. Third-party source, license, pin, and patch details
-are recorded in
+The trusted `Verify` workflow runs on the ProArt runner labels `[self-hosted, linux, x64, proart]`
+for pushes to branches in `experto-hub/system-proof` and for authorized manual dispatches. The job
+uses the digest-pinned
+`ghcr.io/experto-hub/ci-java21@sha256:2e92bf86bbb59cf1ae1447bdeca327909ac160885da4600ff051ef1bfbf6d56d`
+image. Java 21 remains the required project and compiler version, while the repository's Maven
+Wrapper remains the sole Maven version owner.
+
+The job mounts only the ProArt Docker socket required by Testcontainers. It uses
+`DOCKER_HOST=unix:///var/run/docker.sock` and `host.docker.internal` host-gateway resolution so
+containers and mapped ports are reachable from the Java job container. The same job executes unit
+and architecture tests, Docker integration tests including the interaction gateway proof, builds
+the reference ingestion application and adapted SMSC fixture, and runs the complete topology
+smoke. Testcontainers' resource reaper remains enabled, and CI verifies that Testcontainers
+containers and networks return to the pre-build baseline.
+
+Docker verification is temporarily serialized across all repository refs because the reference
+image builds use shared local tags on the persistent ProArt daemon. Runs are queued rather than
+cancelled so one ref cannot interrupt another ref's cleanup.
+
+The workflow deliberately has no `pull_request` trigger. Untrusted fork code never runs on ProArt,
+receives private package access, or obtains the ProArt Docker socket. Organization-owned pull
+request branches are verified by their push runs. External contributors can run `./mvnw clean
+verify` locally; a maintainer must reproduce accepted changes on an organization-controlled branch
+before trusted CI verification. Third-party source, license, pin, and patch details are recorded in
 [`docs/third-party.md`](docs/third-party.md).

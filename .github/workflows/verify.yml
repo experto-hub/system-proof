@@ -3,30 +3,152 @@ name: Verify
 on:
   push:
     branches:
-      - main
-  pull_request:
+      - "**"
   workflow_dispatch:
 
 permissions:
   contents: read
+  packages: read
 
 concurrency:
-  group: verify-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: system-proof-docker-verification
+  cancel-in-progress: false
 
 jobs:
   verify:
     name: Java 21 full verification
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, proart]
     timeout-minutes: 30
+    container:
+      image: ghcr.io/experto-hub/ci-java21@sha256:2e92bf86bbb59cf1ae1447bdeca327909ac160885da4600ff051ef1bfbf6d56d
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+      env:
+        DOCKER_HOST: unix:///var/run/docker.sock
+        TESTCONTAINERS_HOST_OVERRIDE: host.docker.internal
+        TESTCONTAINERS_RYUK_DISABLED: "false"
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock
+      options: --add-host host.docker.internal:host-gateway
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
-      - name: Set up Java 21
-        uses: actions/setup-java@v5
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          distribution: temurin
-          java-version: "21"
-          cache: maven
+          persist-credentials: false
+
+      - name: Verify ProArt environment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          expected_image='ghcr.io/experto-hub/ci-java21@sha256:2e92bf86bbb59cf1ae1447bdeca327909ac160885da4600ff051ef1bfbf6d56d'
+          java_feature="$(
+            java -XshowSettings:properties -version 2>&1 |
+              awk -F' = ' '/^[[:space:]]*java.specification.version = / { print $2; exit }'
+          )"
+          javac_version="$(javac -version 2>&1 | awk '{ print $2 }')"
+          test "$java_feature" = "21"
+          test "${javac_version%%.*}" = "21"
+
+          test -d "$GITHUB_WORKSPACE"
+          test -w "$GITHUB_WORKSPACE"
+          workspace_probe="${GITHUB_WORKSPACE}/.system-proof-write-probe-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          trap 'rm -f -- "$workspace_probe"' EXIT
+          : > "$workspace_probe"
+          test -s /etc/ssl/certs/ca-certificates.crt
+
+          test "$DOCKER_HOST" = "unix:///var/run/docker.sock"
+          test "$TESTCONTAINERS_HOST_OVERRIDE" = "host.docker.internal"
+          test -S /var/run/docker.sock
+          test -r /var/run/docker.sock
+          test -w /var/run/docker.sock
+          test "$(curl --fail --silent --show-error --unix-socket /var/run/docker.sock http://localhost/_ping)" = "OK"
+
+          container_json="$(
+            curl --fail --silent --show-error \
+              --unix-socket /var/run/docker.sock \
+              "http://localhost/containers/${HOSTNAME}/json"
+          )"
+          if [[ "$container_json" != *"\"Image\":\"${expected_image}\""* ]]; then
+            echo "The running job container does not use ${expected_image}." >&2
+            exit 1
+          fi
+          test -n "$(getent ahostsv4 host.docker.internal | awk 'NR == 1 { print $1 }')"
+
+          testcontainers_resource_ids() {
+            local endpoint="$1"
+            shift
+            curl --fail --silent --show-error \
+              --unix-socket /var/run/docker.sock \
+              --get \
+              "$@" \
+              --data-urlencode 'filters={"label":["org.testcontainers=true"]}' \
+              "http://localhost/${endpoint}" |
+              tr '{},' '\n' |
+              sed -nE 's/^[[:space:]]*"Id":"([0-9a-f]{12,64})".*$/\1/p' |
+              sort --unique
+          }
+
+          {
+            echo '[containers]'
+            testcontainers_resource_ids containers/json --data-urlencode 'all=1'
+            echo '[networks]'
+            testcontainers_resource_ids networks
+          } > "${RUNNER_TEMP}/system-proof-testcontainers-before.txt"
+
+          echo "Java feature version: ${java_feature}"
+          echo "javac version: ${javac_version}"
+          echo "CI image: ${expected_image}"
+          echo "Docker daemon: reachable through ${DOCKER_HOST}"
+          echo "Testcontainers host override: ${TESTCONTAINERS_HOST_OVERRIDE}"
+
       - name: Run unit, integration, and full-topology smoke tests
+        shell: bash
         run: ./mvnw --batch-mode --no-transfer-progress clean verify
+
+      - name: Verify Testcontainers cleanup
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          testcontainers_resource_ids() {
+            local endpoint="$1"
+            shift
+            curl --fail --silent --show-error \
+              --unix-socket /var/run/docker.sock \
+              --get \
+              "$@" \
+              --data-urlencode 'filters={"label":["org.testcontainers=true"]}' \
+              "http://localhost/${endpoint}" |
+              tr '{},' '\n' |
+              sed -nE 's/^[[:space:]]*"Id":"([0-9a-f]{12,64})".*$/\1/p' |
+              sort --unique
+          }
+
+          snapshot_resources() {
+            {
+              echo '[containers]'
+              testcontainers_resource_ids containers/json --data-urlencode 'all=1'
+              echo '[networks]'
+              testcontainers_resource_ids networks
+            } > "$1"
+          }
+
+          baseline="${RUNNER_TEMP}/system-proof-testcontainers-before.txt"
+          current="${RUNNER_TEMP}/system-proof-testcontainers-after.txt"
+          test -f "$baseline"
+
+          for _ in $(seq 1 30); do
+            snapshot_resources "$current"
+            if cmp --silent "$baseline" "$current"; then
+              echo "Testcontainers containers and networks returned to the pre-build baseline."
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "Testcontainers resources differ from the pre-build baseline:" >&2
+          diff --unified "$baseline" "$current" >&2 || true
+          exit 1
