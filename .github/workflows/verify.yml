@@ -26,7 +26,7 @@ jobs:
         password: ${{ github.token }}
       env:
         DOCKER_HOST: unix:///var/run/docker.sock
-        MAVEN_OPTS: -Dapi.version=1.40
+        "api.version": "1.40"
         TESTCONTAINERS_HOST_OVERRIDE: host.docker.internal
         TESTCONTAINERS_RYUK_DISABLED: "false"
       volumes:
@@ -65,7 +65,7 @@ jobs:
           test -r /var/run/docker.sock
           test -w /var/run/docker.sock
           test "$(curl --fail --silent --show-error --unix-socket /var/run/docker.sock http://localhost/_ping)" = "OK"
-          test "$MAVEN_OPTS" = "-Dapi.version=1.40"
+          test "$(printenv 'api.version')" = "1.40"
           test "$(curl --fail --silent --show-error --unix-socket /var/run/docker.sock http://localhost/v1.40/_ping)" = "OK"
 
           container_json="$(
