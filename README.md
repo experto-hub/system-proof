@@ -659,7 +659,10 @@ Docker verification is serialized across repository refs because the reference i
 shared local tags on the persistent ProArt daemon. A named daemon-scoped lock container retains the
 full queue instead of relying on GitHub Actions concurrency, which keeps only one pending run. The
 lock helper watches the owning job container through the Docker API and removes itself if that job
-stops; an `always()` step releases it normally after Testcontainers cleanup.
+stops; an `always()` step releases it normally after Testcontainers cleanup. A waiter reclaims a
+non-running lock after the recorded owning job container has stopped or disappeared, or after a
+bounded 60-second helper-start grace. This covers abrupt runner loss between lock creation and
+helper startup without racing a normal local Docker start.
 
 The workflow deliberately has no `pull_request` trigger. Untrusted fork code never runs on ProArt,
 receives private package access, or obtains the ProArt Docker socket. Organization-owned pull

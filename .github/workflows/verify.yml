@@ -89,6 +89,7 @@ jobs:
           expected_image='ghcr.io/experto-hub/ci-java21@sha256:2e92bf86bbb59cf1ae1447bdeca327909ac160885da4600ff051ef1bfbf6d56d'
           lock_name='system-proof-docker-verification-lock'
           lock_response="${RUNNER_TEMP}/system-proof-docker-lock-response.json"
+          owner_response="${RUNNER_TEMP}/system-proof-docker-lock-owner.json"
           lock_id_file="${RUNNER_TEMP}/system-proof-docker-lock-id.txt"
           payload="$(cat <<JSON
           {
@@ -107,7 +108,9 @@ jobs:
             "Labels": {
               "io.github.experto-hub.system-proof.docker-verification-lock": "true",
               "io.github.experto-hub.system-proof.run-id": "${GITHUB_RUN_ID}",
-              "io.github.experto-hub.system-proof.run-attempt": "${GITHUB_RUN_ATTEMPT}"
+              "io.github.experto-hub.system-proof.run-attempt": "${GITHUB_RUN_ATTEMPT}",
+              "io.github.experto-hub.system-proof.owner-container-id": "${HOSTNAME}",
+              "io.github.experto-hub.system-proof.lock-created-epoch": "__CREATED_EPOCH__"
             },
             "HostConfig": {
               "AutoRemove": true,
@@ -118,6 +121,7 @@ jobs:
           )"
 
           while true; do
+            create_payload="${payload/__CREATED_EPOCH__/$(date +%s)}"
             create_status="$(
               curl --silent --show-error \
                 --unix-socket /var/run/docker.sock \
@@ -125,11 +129,91 @@ jobs:
                 --write-out '%{http_code}' \
                 --header 'Content-Type: application/json' \
                 --request POST \
-                --data-binary "$payload" \
+                --data-binary "$create_payload" \
                 "http://localhost/v1.40/containers/create?name=${lock_name}"
             )"
 
             if [[ "$create_status" = "409" ]]; then
+              inspect_status="$(
+                curl --silent --show-error \
+                  --unix-socket /var/run/docker.sock \
+                  --output "$lock_response" \
+                  --write-out '%{http_code}' \
+                  "http://localhost/v1.40/containers/${lock_name}/json"
+              )"
+              if [[ "$inspect_status" = "404" ]]; then
+                continue
+              fi
+              if [[ "$inspect_status" != "200" ]]; then
+                cat "$lock_response" >&2
+                echo "Cannot inspect the shared Docker verification lock (HTTP ${inspect_status})." >&2
+                exit 1
+              fi
+
+              lock_json="$(< "$lock_response")"
+              if [[ "$lock_json" != *'"io.github.experto-hub.system-proof.docker-verification-lock":"true"'* ]]; then
+                echo "The shared Docker lock name is owned by an unexpected container." >&2
+                exit 1
+              fi
+
+              if [[ "$lock_json" = *'"Running":false'* ]]; then
+                owner_id="$(
+                  sed -nE \
+                    's/^.*"io.github.experto-hub.system-proof.owner-container-id":"([0-9a-f]{12,64})".*$/\1/p' \
+                    "$lock_response"
+                )"
+                lock_created_epoch="$(
+                  sed -nE \
+                    's/^.*"io.github.experto-hub.system-proof.lock-created-epoch":"([0-9]+)".*$/\1/p' \
+                    "$lock_response"
+                )"
+                owner_running='false'
+                if [[ -n "$owner_id" ]]; then
+                  owner_status="$(
+                    curl --silent --show-error \
+                      --unix-socket /var/run/docker.sock \
+                      --output "$owner_response" \
+                      --write-out '%{http_code}' \
+                      "http://localhost/v1.40/containers/${owner_id}/json"
+                  )"
+                  if [[ "$owner_status" = "200" ]]; then
+                    owner_json="$(< "$owner_response")"
+                    if [[ "$owner_json" = *'"Running":true'* ]]; then
+                      owner_running='true'
+                    fi
+                  elif [[ "$owner_status" != "404" ]]; then
+                    cat "$owner_response" >&2
+                    echo "Cannot inspect the Docker lock owner (HTTP ${owner_status})." >&2
+                    exit 1
+                  fi
+                fi
+
+                startup_grace_expired='false'
+                if [[ "$lock_created_epoch" =~ ^[0-9]+$ ]] \
+                  && (( $(date +%s) - lock_created_epoch >= 60 )); then
+                  startup_grace_expired='true'
+                fi
+
+                if [[ "$owner_running" = "false" || "$startup_grace_expired" = "true" ]]; then
+                  stale_lock_id="$(sed -nE 's/^.*"Id":"([0-9a-f]{12,64})".*$/\1/p' "$lock_response")"
+                  test -n "$stale_lock_id"
+                  delete_status="$(
+                    curl --silent --show-error \
+                      --unix-socket /var/run/docker.sock \
+                      --output /dev/null \
+                      --write-out '%{http_code}' \
+                      --request DELETE \
+                      "http://localhost/v1.40/containers/${stale_lock_id}?force=true"
+                  )"
+                  if [[ "$delete_status" != "204" && "$delete_status" != "404" ]]; then
+                    echo "Cannot reclaim the stale Docker verification lock (HTTP ${delete_status})." >&2
+                    exit 1
+                  fi
+                  echo "Reclaimed stale Docker verification lock ${stale_lock_id}."
+                  continue
+                fi
+              fi
+
               echo "Another System Proof verification owns the Docker lock; waiting."
               sleep 5
               continue
