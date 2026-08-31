@@ -661,8 +661,12 @@ full queue instead of relying on GitHub Actions concurrency, which keeps only on
 lock helper watches the owning job container through the Docker API and removes itself if that job
 stops; an `always()` step releases it normally after Testcontainers cleanup. A waiter reclaims a
 non-running lock after the recorded owning job container has stopped or disappeared, or after a
-bounded 60-second helper-start grace. This covers abrupt runner loss between lock creation and
-helper startup without racing a normal local Docker start.
+bounded 60-second helper-start grace. Every lock also has a 25-minute maximum lease, while the
+Maven verification step has a 20-minute limit. The five-minute margin lets a later run recover a
+running helper whose runner and job container were orphaned. On lease expiry, the waiter first
+stops the digest-verified owner job container and then reclaims its helper, so abandoned Maven work
+cannot overlap a later verification. The 90-minute job limit retains up to four waiting ProArt jobs
+at their bounded Maven duration.
 
 The workflow deliberately has no `pull_request` trigger. Untrusted fork code never runs on ProArt,
 receives private package access, or obtains the ProArt Docker socket. Organization-owned pull
