@@ -10,10 +10,6 @@ permissions:
   contents: read
   packages: read
 
-concurrency:
-  group: system-proof-docker-verification
-  cancel-in-progress: false
-
 jobs:
   verify:
     name: Java 21 full verification
@@ -77,6 +73,97 @@ jobs:
           fi
           test -n "$(getent ahostsv4 host.docker.internal | awk 'NR == 1 { print $1 }')"
 
+          echo "Java feature version: ${java_feature}"
+          echo "javac version: ${javac_version}"
+          echo "CI image: ${expected_image}"
+          echo "Docker daemon: reachable through ${DOCKER_HOST}"
+          echo "Docker API version: 1.40"
+          echo "Testcontainers host override: ${TESTCONTAINERS_HOST_OVERRIDE}"
+
+      - name: Acquire shared Docker verification lock
+        id: docker_lock
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          expected_image='ghcr.io/experto-hub/ci-java21@sha256:2e92bf86bbb59cf1ae1447bdeca327909ac160885da4600ff051ef1bfbf6d56d'
+          lock_name='system-proof-docker-verification-lock'
+          lock_response="${RUNNER_TEMP}/system-proof-docker-lock-response.json"
+          lock_id_file="${RUNNER_TEMP}/system-proof-docker-lock-id.txt"
+          payload="$(cat <<JSON
+          {
+            "Image": "${expected_image}",
+            "Cmd": [
+              "curl",
+              "--fail",
+              "--silent",
+              "--show-error",
+              "--unix-socket",
+              "/var/run/docker.sock",
+              "--request",
+              "POST",
+              "http://localhost/v1.40/containers/${HOSTNAME}/wait?condition=not-running"
+            ],
+            "Labels": {
+              "io.github.experto-hub.system-proof.docker-verification-lock": "true",
+              "io.github.experto-hub.system-proof.run-id": "${GITHUB_RUN_ID}",
+              "io.github.experto-hub.system-proof.run-attempt": "${GITHUB_RUN_ATTEMPT}"
+            },
+            "HostConfig": {
+              "AutoRemove": true,
+              "Binds": ["/var/run/docker.sock:/var/run/docker.sock"]
+            }
+          }
+          JSON
+          )"
+
+          while true; do
+            create_status="$(
+              curl --silent --show-error \
+                --unix-socket /var/run/docker.sock \
+                --output "$lock_response" \
+                --write-out '%{http_code}' \
+                --header 'Content-Type: application/json' \
+                --request POST \
+                --data-binary "$payload" \
+                "http://localhost/v1.40/containers/create?name=${lock_name}"
+            )"
+
+            if [[ "$create_status" = "409" ]]; then
+              echo "Another System Proof verification owns the Docker lock; waiting."
+              sleep 5
+              continue
+            fi
+            if [[ "$create_status" != "201" ]]; then
+              cat "$lock_response" >&2
+              echo "Cannot create the shared Docker verification lock (HTTP ${create_status})." >&2
+              exit 1
+            fi
+
+            lock_id="$(sed -nE 's/^.*"Id":"([0-9a-f]{12,64})".*$/\1/p' "$lock_response")"
+            test -n "$lock_id"
+            printf '%s\n' "$lock_id" > "$lock_id_file"
+            echo "acquired=true" >> "$GITHUB_OUTPUT"
+            start_status="$(
+              curl --silent --show-error \
+                --unix-socket /var/run/docker.sock \
+                --output /dev/null \
+                --write-out '%{http_code}' \
+                --request POST \
+                "http://localhost/v1.40/containers/${lock_id}/start"
+            )"
+            if [[ "$start_status" != "204" ]]; then
+              curl --silent --show-error \
+                --unix-socket /var/run/docker.sock \
+                --request DELETE \
+                "http://localhost/v1.40/containers/${lock_id}?force=true" >/dev/null || true
+              echo "Cannot start the shared Docker verification lock (HTTP ${start_status})." >&2
+              exit 1
+            fi
+            echo "Acquired shared Docker verification lock ${lock_id}."
+            break
+          done
+
           testcontainers_resource_ids() {
             local endpoint="$1"
             shift
@@ -98,13 +185,6 @@ jobs:
             testcontainers_resource_ids networks
           } > "${RUNNER_TEMP}/system-proof-testcontainers-before.txt"
 
-          echo "Java feature version: ${java_feature}"
-          echo "javac version: ${javac_version}"
-          echo "CI image: ${expected_image}"
-          echo "Docker daemon: reachable through ${DOCKER_HOST}"
-          echo "Docker API version: 1.40"
-          echo "Testcontainers host override: ${TESTCONTAINERS_HOST_OVERRIDE}"
-
       - name: Run unit, integration, and full-topology smoke tests
         shell: bash
         env:
@@ -112,7 +192,7 @@ jobs:
         run: ./mvnw --batch-mode --no-transfer-progress clean verify
 
       - name: Verify Testcontainers cleanup
-        if: ${{ always() }}
+        if: ${{ always() && steps.docker_lock.outputs.acquired == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -156,3 +236,26 @@ jobs:
           echo "Testcontainers resources differ from the pre-build baseline:" >&2
           diff --unified "$baseline" "$current" >&2 || true
           exit 1
+
+      - name: Release shared Docker verification lock
+        if: ${{ always() && steps.docker_lock.outputs.acquired == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          lock_id="$(< "${RUNNER_TEMP}/system-proof-docker-lock-id.txt")"
+          response="${RUNNER_TEMP}/system-proof-docker-lock-release.json"
+          release_status="$(
+            curl --silent --show-error \
+              --unix-socket /var/run/docker.sock \
+              --output "$response" \
+              --write-out '%{http_code}' \
+              --request DELETE \
+              "http://localhost/v1.40/containers/${lock_id}?force=true"
+          )"
+          if [[ "$release_status" != "204" && "$release_status" != "404" ]]; then
+            cat "$response" >&2
+            echo "Cannot release the shared Docker verification lock (HTTP ${release_status})." >&2
+            exit 1
+          fi
+          echo "Released shared Docker verification lock ${lock_id}."

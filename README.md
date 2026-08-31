@@ -655,9 +655,11 @@ containers and networks return to the pre-build baseline. CI supplies the Maven 
 docker-java API version 1.40, the minimum accepted by the ProArt daemon, without changing the
 canonical Wrapper command or the project's managed dependencies.
 
-Docker verification is temporarily serialized across all repository refs because the reference
-image builds use shared local tags on the persistent ProArt daemon. Runs are queued rather than
-cancelled so one ref cannot interrupt another ref's cleanup.
+Docker verification is serialized across repository refs because the reference image builds use
+shared local tags on the persistent ProArt daemon. A named daemon-scoped lock container retains the
+full queue instead of relying on GitHub Actions concurrency, which keeps only one pending run. The
+lock helper watches the owning job container through the Docker API and removes itself if that job
+stops; an `always()` step releases it normally after Testcontainers cleanup.
 
 The workflow deliberately has no `pull_request` trigger. Untrusted fork code never runs on ProArt,
 receives private package access, or obtains the ProArt Docker socket. Organization-owned pull
