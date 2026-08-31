@@ -26,7 +26,6 @@ jobs:
         password: ${{ github.token }}
       env:
         DOCKER_HOST: unix:///var/run/docker.sock
-        JAVA_TOOL_OPTIONS: -Dapi.version=1.40
         TESTCONTAINERS_HOST_OVERRIDE: host.docker.internal
         TESTCONTAINERS_RYUK_DISABLED: "false"
       volumes:
@@ -65,7 +64,6 @@ jobs:
           test -r /var/run/docker.sock
           test -w /var/run/docker.sock
           test "$(curl --fail --silent --show-error --unix-socket /var/run/docker.sock http://localhost/_ping)" = "OK"
-          test "$JAVA_TOOL_OPTIONS" = "-Dapi.version=1.40"
           test "$(curl --fail --silent --show-error --unix-socket /var/run/docker.sock http://localhost/v1.40/_ping)" = "OK"
 
           container_json="$(
@@ -109,6 +107,8 @@ jobs:
 
       - name: Run unit, integration, and full-topology smoke tests
         shell: bash
+        env:
+          JAVA_TOOL_OPTIONS: -Dapi.version=1.40
         run: ./mvnw --batch-mode --no-transfer-progress clean verify
 
       - name: Verify Testcontainers cleanup
